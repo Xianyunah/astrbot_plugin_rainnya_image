@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import functools
-import io
 import json
 import random
 import re
@@ -9,16 +8,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-import aiohttp
-from PIL import Image as PILImage
-
 from astrbot import logger
 from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Reply, Plain
+from astrbot.core.message.components import At, Image, Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.provider import Provider
+
+from .image_parser import extract_image_bytes_from_response
+from .image_workflow import ImageWorkflow
+from .storage import load_json, save_json
 
 
 @register(
@@ -29,144 +29,6 @@ from astrbot.core.provider import Provider
     "https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage",
 )
 class FigurineProPlugin(Star):
-    class ImageWorkflow:
-        def __init__(self, proxy_url: str | None = None, timeout: int = 60, retries: int = 3):
-            if proxy_url: logger.info(f"ImageWorkflow 使用代理: {proxy_url}")
-            self.session = aiohttp.ClientSession()
-            self.proxy = proxy_url
-            self.timeout = timeout
-            self.retries = retries
-
-        async def _download_image(self, url: str, timeout: Optional[int] = None, max_retries: Optional[int] = None) -> bytes | None:
-            """
-            下载图片，支持重试机制和更长的超时时间。
-            
-            Args:
-                url: 图片URL
-                timeout: 单次请求超时时间（秒），默认使用构造函数传入的值
-                max_retries: 最大重试次数，默认使用构造函数传入的值
-            """
-            timeout = timeout or self.timeout
-            max_retries = max_retries if max_retries is not None else self.retries
-            
-            logger.info(f"正在尝试下载图片: {url}")
-            
-            last_error = None
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        logger.info(f"第 {attempt + 1} 次重试下载: {url}")
-                        # 重试前等待一小段时间
-                        await asyncio.sleep(1 * attempt)
-                    
-                    async with self.session.get(url, proxy=self.proxy, timeout=timeout) as resp:
-                        resp.raise_for_status()
-                        return await resp.read()
-                except aiohttp.ClientResponseError as e:
-                    last_error = f"HTTP状态码 {e.status}: {e.message}"
-                    logger.warning(f"图片下载失败 (尝试 {attempt + 1}/{max_retries}): {last_error}, URL: {url}")
-                    if e.status in (400, 401, 403, 404):
-                        # 这些错误重试也没用
-                        break
-                except asyncio.TimeoutError:
-                    last_error = f"请求超时 ({timeout}s)"
-                    logger.warning(f"图片下载失败 (尝试 {attempt + 1}/{max_retries}): {last_error}, URL: {url}")
-                except Exception as e:
-                    last_error = f"{type(e).__name__}: {e}"
-                    logger.warning(f"图片下载失败 (尝试 {attempt + 1}/{max_retries}): {last_error}, URL: {url}")
-            
-            logger.error(f"图片下载最终失败: {last_error}, URL: {url}")
-            return None
-
-        async def _get_avatar(self, user_id: str) -> bytes | None:
-            if not user_id.isdigit(): logger.warning(f"无法获取非 QQ 平台或无效 QQ 号 {user_id} 的头像。"); return None
-            avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
-            return await self._download_image(avatar_url)
-
-        def _extract_first_frame_sync(self, raw: bytes) -> bytes:
-            img_io = io.BytesIO(raw)
-            try:
-                with PILImage.open(img_io) as img:
-                    if getattr(img, "is_animated", False):
-                        logger.info("检测到动图, 将抽取第一帧进行生成")
-                        img.seek(0)
-                        first_frame = img.convert("RGBA")
-                        out_io = io.BytesIO()
-                        first_frame.save(out_io, format="PNG")
-                        return out_io.getvalue()
-            except Exception as e:
-                logger.warning(f"抽取图片帧时发生错误, 将返回原始数据: {e}", exc_info=True)
-            return raw
-
-        async def _load_bytes(self, src: str) -> bytes | None:
-            raw: bytes | None = None
-            loop = asyncio.get_running_loop()
-            if Path(src).is_file():
-                raw = await loop.run_in_executor(None, Path(src).read_bytes)
-            elif src.startswith("http"):
-                raw = await self._download_image(src)
-            elif src.startswith("base64://"):
-                raw = await loop.run_in_executor(None, base64.b64decode, src[9:])
-            if not raw: return None
-            return await loop.run_in_executor(None, self._extract_first_frame_sync, raw)
-
-        async def _image_component_to_bytes(self, image_comp: Image) -> bytes | None:
-            """
-            将 Image 组件转换为字节。
-            优先使用 AstrBot 提供的 convert_to_base64，兼容 WebChat 等平台的图片来源。
-            """
-            # 1. 直接尝试 convert_to_base64
-            if hasattr(image_comp, "convert_to_base64"):
-                try:
-                    base64_str = await image_comp.convert_to_base64()
-                    if base64_str:
-                        if base64_str.startswith("data:image/"):
-                            base64_str = base64_str.split(",", 1)[1]
-                        return base64.b64decode(base64_str)
-                except Exception as e:
-                    logger.warning(f"通过 convert_to_base64 获取图片数据失败: {e}", exc_info=True)
-
-            # 2. 回退到原有逻辑
-            if image_comp.url:
-                return await self._load_bytes(image_comp.url) or None
-            if image_comp.file:
-                return await self._load_bytes(image_comp.file) or None
-            return None
-
-        async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
-            img_bytes_list: List[bytes] = []
-            at_user_ids: List[str] = []
-
-            for seg in event.message_obj.message:
-                if isinstance(seg, Reply) and seg.chain:
-                    for s_chain in seg.chain:
-                        if isinstance(s_chain, Image):
-                            if img := await self._image_component_to_bytes(s_chain):
-                                img_bytes_list.append(img)
-
-            for seg in event.message_obj.message:
-                if isinstance(seg, Image):
-                    if img := await self._image_component_to_bytes(seg):
-                        img_bytes_list.append(img)
-                elif isinstance(seg, At):
-                    at_user_ids.append(str(seg.qq))
-
-            if img_bytes_list:
-                return img_bytes_list
-
-            if at_user_ids:
-                for user_id in at_user_ids:
-                    if avatar := await self._get_avatar(user_id):
-                        img_bytes_list.append(avatar)
-                return img_bytes_list
-
-            if avatar := await self._get_avatar(event.get_sender_id()):
-                img_bytes_list.append(avatar)
-
-            return img_bytes_list
-
-        async def terminate(self):
-            if self.session and not self.session.closed: await self.session.close()
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -187,7 +49,7 @@ class FigurineProPlugin(Star):
         self.prompt_map: Dict[str, str] = {}
         self.key_index = 0
         self.key_lock = asyncio.Lock()
-        self.iwf: Optional[FigurineProPlugin.ImageWorkflow] = None
+        self.iwf: Optional[ImageWorkflow] = None
         self.group_task_counts: Dict[str, int] = {}
         self.queue_lock = asyncio.Lock()
         self.group_task_limit: int = 0
@@ -212,7 +74,7 @@ class FigurineProPlugin(Star):
         dl_timeout = self.conf.get("download_timeout", 60)
         dl_retries = self.conf.get("download_retries", 3)
         
-        self.iwf = self.ImageWorkflow(proxy_url, timeout=dl_timeout, retries=dl_retries)
+        self.iwf = ImageWorkflow(proxy_url, timeout=dl_timeout, retries=dl_retries)
         await self._load_prompt_map()
         await self._load_user_counts()
         await self._load_group_counts()
@@ -559,25 +421,14 @@ class FigurineProPlugin(Star):
         return str(uid) in [str(x) for x in admin_ids]
 
     async def _load_user_counts(self):
-        if not self.user_counts_file.exists(): self.user_counts = {}; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.user_counts_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, dict): self.user_counts = {str(k): v for k, v in data.items()}
-        except Exception as e:
-            logger.error(f"加载用户次数文件时发生错误: {e}", exc_info=True);
+        data = await load_json(self.user_counts_file)
+        if isinstance(data, dict):
+            self.user_counts = {str(k): v for k, v in data.items()}
+        else:
             self.user_counts = {}
 
     async def _save_user_counts(self):
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None,
-                                                   functools.partial(json.dumps, self.user_counts, ensure_ascii=False,
-                                                                     indent=4))
-            await loop.run_in_executor(None, self.user_counts_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存用户次数文件时发生错误: {e}", exc_info=True)
+        await save_json(self.user_counts_file, self.user_counts)
 
     def _get_user_count(self, user_id: str) -> int:
         return self.user_counts.get(str(user_id), 0)
@@ -588,25 +439,14 @@ class FigurineProPlugin(Star):
         if count > 0: self.user_counts[user_id_str] = count - 1; await self._save_user_counts()
 
     async def _load_group_counts(self):
-        if not self.group_counts_file.exists(): self.group_counts = {}; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.group_counts_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, dict): self.group_counts = {str(k): v for k, v in data.items()}
-        except Exception as e:
-            logger.error(f"加载群组次数文件时发生错误: {e}", exc_info=True);
+        data = await load_json(self.group_counts_file)
+        if isinstance(data, dict):
+            self.group_counts = {str(k): v for k, v in data.items()}
+        else:
             self.group_counts = {}
 
     async def _save_group_counts(self):
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None,
-                                                   functools.partial(json.dumps, self.group_counts, ensure_ascii=False,
-                                                                     indent=4))
-            await loop.run_in_executor(None, self.group_counts_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存群组次数文件时发生错误: {e}", exc_info=True)
+        await save_json(self.group_counts_file, self.group_counts)
 
     def _get_group_count(self, group_id: str) -> int:
         return self.group_counts.get(str(group_id), 0)
@@ -648,68 +488,38 @@ class FigurineProPlugin(Star):
             await self._decrease_user_count(sender_id)
 
     async def _load_user_checkin_data(self):
-        if not self.user_checkin_file.exists(): self.user_checkin_data = {}; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.user_checkin_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, dict): self.user_checkin_data = {str(k): v for k, v in data.items()}
-        except Exception as e:
-            logger.error(f"加载用户签到文件时发生错误: {e}", exc_info=True);
+        data = await load_json(self.user_checkin_file)
+        if isinstance(data, dict):
+            self.user_checkin_data = {str(k): v for k, v in data.items()}
+        else:
             self.user_checkin_data = {}
 
     async def _save_user_checkin_data(self):
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, self.user_checkin_data,
-                                                                           ensure_ascii=False, indent=4))
-            await loop.run_in_executor(None, self.user_checkin_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存用户签到文件时发生错误: {e}", exc_info=True)
+        await save_json(self.user_checkin_file, self.user_checkin_data)
 
     async def _load_group_models(self):
         """加载各群配置的生图模型映射 {群号: 模型名}"""
-        if not self.group_model_file.exists(): self.group_models = {}; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.group_model_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, dict): self.group_models = {str(k): str(v) for k, v in data.items()}
-        except Exception as e:
-            logger.error(f"加载群组模型文件时发生错误: {e}", exc_info=True);
+        data = await load_json(self.group_model_file)
+        if isinstance(data, dict):
+            self.group_models = {str(k): str(v) for k, v in data.items()}
+        else:
             self.group_models = {}
 
     async def _save_group_models(self):
         """保存各群配置的生图模型映射 {群号: 模型名}"""
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, self.group_models,
-                                                                           ensure_ascii=False, indent=4))
-            await loop.run_in_executor(None, self.group_model_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存群组模型文件时发生错误: {e}", exc_info=True)
+        await save_json(self.group_model_file, self.group_models)
 
     async def _load_generation_history(self):
         """加载生图时间线记录列表（每条 {timestamp, group_id, user_id, prompt, model, file_path}）"""
-        if not self.generation_history_file.exists(): self.generation_history = []; return
-        loop = asyncio.get_running_loop()
-        try:
-            content = await loop.run_in_executor(None, self.generation_history_file.read_text, "utf-8")
-            data = await loop.run_in_executor(None, json.loads, content)
-            if isinstance(data, list): self.generation_history = data
-        except Exception as e:
-            logger.error(f"加载生图时间线文件时发生错误: {e}", exc_info=True);
+        data = await load_json(self.generation_history_file)
+        if isinstance(data, list):
+            self.generation_history = data
+        else:
             self.generation_history = []
 
     async def _save_generation_history(self):
         """保存生图时间线记录列表"""
-        loop = asyncio.get_running_loop()
-        try:
-            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, self.generation_history,
-                                                                           ensure_ascii=False, indent=4))
-            await loop.run_in_executor(None, self.generation_history_file.write_text, json_data, "utf-8")
-        except Exception as e:
-            logger.error(f"保存生图时间线文件时发生错误: {e}", exc_info=True)
+        await save_json(self.generation_history_file, self.generation_history)
 
     async def _append_generation_history(self, record: Dict[str, Any]) -> None:
         """向生图时间线追加一条记录，超过 500 条时删除最旧的。"""
@@ -1260,150 +1070,6 @@ class FigurineProPlugin(Star):
             logger.debug(f"[FigurinePro] 群 {group_id} 任务释放，当前 {self.group_task_counts.get(group_id, 0)}")
 
 
-    async def _extract_image_from_markdown(self, text: str) -> bytes | None:
-        if not text or not self.iwf:
-            return None
-        match = re.search(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", text)
-        if match:
-            url = match.group(1).strip()
-            try:
-                downloaded = await self.iwf._download_image(url)
-                if downloaded:
-                    return downloaded
-            except Exception as e:
-                logger.warning(f"下载 Markdown 图片失败: {e}", exc_info=True)
-        return None
-
-    async def _extract_image_bytes_from_response(self, data: Dict[str, Any]) -> bytes | str | None:
-        """
-        从 OpenAI / OpenRouter 风格的响应中提取图像数据。
-        兼容多种可能的返回结构，包括：
-            - images 直接列表
-            - chat.completions 的 choices[].message.images
-            - chat.completions 的 choices[].message.content 内嵌
-            - data[].url / data[].b64_json
-        
-        返回值:
-            - bytes: 成功下载的图片数据
-            - str: 如果是以 "FALLBACK_URL:" 开头的字符串，表示下载失败但有可用URL
-            - None: 完全没有找到图像数据
-        """
-        found_urls: List[str] = []  # 记录所有发现的URL，用于fallback
-        
-        async def try_download_or_record(url: str) -> bytes | None:
-            """尝试下载URL，如果失败则记录URL用于fallback"""
-            if url.startswith("data:image/"):
-                try:
-                    return base64.b64decode(url.split(",", 1)[1])
-                except Exception:
-                    return None
-            if self.iwf:
-                downloaded = await self.iwf._download_image(url)
-                if downloaded:
-                    return downloaded
-                # 下载失败，记录URL
-                found_urls.append(url)
-            return None
-        
-        try:
-            # 1. OpenAI Images API 风格 {"data": [{"url": "..."}]} 或 {"data": [{"b64_json": "..."}]}
-            if isinstance(data.get("data"), list):
-                for item in data["data"]:
-                    if isinstance(item, dict):
-                        if url := item.get("url"):
-                            result = await try_download_or_record(url)
-                            if result:
-                                return result
-                        if b64 := item.get("b64_json"):
-                            return base64.b64decode(b64)
-
-            # 2. 旧格式 {"images": [{"url": "..."}]}
-            if isinstance(data.get("images"), list):
-                for image in data["images"]:
-                    if not isinstance(image, dict):
-                        continue
-                    url = image.get("url")
-                    if url:
-                        result = await try_download_or_record(url)
-                        if result:
-                            return result
-
-            # 3. Chat Completions 风格
-            choices = data.get("choices") or []
-            if choices:
-                message = choices[0].get("message", {})
-
-                # 3.1 message.images 显式结构
-                if isinstance(message.get("images"), list):
-                    for image in message["images"]:
-                        if not isinstance(image, dict):
-                            continue
-                        url = image.get("image_url", {}).get("url") or image.get("url")
-                        if url:
-                            result = await try_download_or_record(url)
-                            if result:
-                                return result
-
-                content = message.get("content")
-
-                # 3.2 content 为列表（OpenAI 新版多模态结构）
-                if isinstance(content, list):
-                    for item in content:
-                        if not isinstance(item, dict):
-                            continue
-
-                        item_type = item.get("type")
-                        if item_type in {"output_image", "image_url", "image"}:
-                            if isinstance(item.get("image_url"), dict):
-                                url = item["image_url"].get("url")
-                                if url:
-                                    result = await try_download_or_record(url)
-                                    if result:
-                                        return result
-                            if url := item.get("url"):
-                                result = await try_download_or_record(url)
-                                if result:
-                                    return result
-                            if b64 := item.get("b64_json"):
-                                return base64.b64decode(b64)
-
-                        # 兼容部分模型直接返回 base64 文本
-                        if item_type in {"text", "output_text"} and isinstance(item.get("text"), str):
-                            text_content = item["text"]
-                            matches = re.findall(r"data:image/([^;]+);base64,([A-Za-z0-9+/=]+)", text_content)
-                            if matches:
-                                return base64.b64decode(matches[0][1])
-                            markdown_img = await self._extract_image_from_markdown(text_content)
-                            if markdown_img:
-                                return markdown_img
-
-                # 3.3 content 为字符串，尝试匹配其中的 base64 或 Markdown 图片
-                if isinstance(content, str):
-                    matches = re.findall(r"data:image/([^;]+);base64,([A-Za-z0-9+/=]+)", content)
-                    if matches:
-                        return base64.b64decode(matches[0][1])
-                    markdown_img = await self._extract_image_from_markdown(content)
-                    if markdown_img:
-                        return markdown_img
-                    # 如果Markdown图片下载失败，尝试提取URL作为fallback
-                    md_match = re.search(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", content)
-                    if md_match:
-                        found_urls.append(md_match.group(1).strip())
-
-            # 如果有发现URL但下载都失败了，返回第一个URL作为fallback
-            if found_urls:
-                logger.warning(f"图片下载失败，但找到了可用URL: {found_urls[0]}")
-                return f"FALLBACK_URL:{found_urls[0]}"
-            
-            logger.warning(f"未能在响应中提取图像数据，原始响应(截断): {str(data)[:200]}")
-            return None
-        except Exception as e:
-            logger.error(f"解析图像响应时出现错误: {e}", exc_info=True)
-            # 即使出错，如果之前记录了URL，也返回它
-            if found_urls:
-                return f"FALLBACK_URL:{found_urls[0]}"
-            return None
-
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
                         group_id: Optional[str] = None) -> tuple:
         """调用 API 生成图像，支持 Gemini 原生 API 和 OpenAI 兼容格式双路由。
@@ -1682,7 +1348,7 @@ class FigurineProPlugin(Star):
                 else:
                     data = await resp.json()
 
-                result = await self._extract_image_bytes_from_response(data)
+                result = await extract_image_bytes_from_response(data, self.iwf)
 
                 if isinstance(result, bytes):
                     return result
