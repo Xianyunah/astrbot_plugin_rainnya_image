@@ -329,38 +329,11 @@ class FigurineProPlugin(Star):
             if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
             if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
                                                                                                    []): return
-            user_count = self._get_user_count(sender_id)
-            group_count = self._get_group_count(group_id) if group_id else 0
-            user_limit_on = self.conf.get("enable_user_limit", True)
-            group_limit_on = self.conf.get("enable_group_limit", False) and group_id
-            
-            # 修复次数限制逻辑：
-            # 1. 如果开启了用户限制且用户次数为0，检查是否有群组次数可用
-            # 2. 如果开启了群组限制且群组次数为0，检查是否有用户次数可用
-            # 3. 只有当所有启用的限制都没有可用次数时才拒绝
-            can_use_user_count = not user_limit_on or user_count > 0
-            can_use_group_count = not group_limit_on or group_count > 0
-            
-            # 核心逻辑：必须至少有一个可用的次数来源
-            if group_id:
-                # 在群聊中：如果两种限制都开启，需要至少一种有次数
-                if user_limit_on and group_limit_on:
-                    if user_count <= 0 and group_count <= 0:
-                        yield event.plain_result("❌ 本群次数与您的个人次数均已用尽。\n请使用「辉宝赐福」获取次数。")
-                        return
-                elif user_limit_on and user_count <= 0:
-                    # 只开启用户限制，用户次数为0
-                    yield event.plain_result("❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。")
-                    return
-                elif group_limit_on and group_count <= 0:
-                    # 只开启群组限制，群组次数为0
-                    yield event.plain_result("❌ 本群次数已用尽。\n请联系管理员增加群组次数。")
-                    return
-            else:
-                # 私聊中：只检查用户限制
-                if user_limit_on and user_count <= 0:
-                    yield event.plain_result("❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。")
-                    return
+            # 次数配额检查（与文生图 / LLM 工具共用 _check_usage_quota）
+            err = self._check_usage_quota(sender_id, group_id)
+            if err:
+                yield event.plain_result(err)
+                return
         if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
             if not is_bnn:
                 yield event.plain_result("请发送或引用一张图片。");
@@ -408,10 +381,8 @@ class FigurineProPlugin(Star):
             elapsed = (datetime.now() - start_time).total_seconds()
             if isinstance(res, bytes):
                 if not is_master:
-                    if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
-                        await self._decrease_group_count(group_id)
-                    elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
-                        await self._decrease_user_count(sender_id)
+                    # 扣除次数（群组优先于个人，管理员豁免）
+                    await self._consume_quota(sender_id, group_id)
                 caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}", f"模型: {used_model}"]
                 if is_master:
                     caption_parts.append("剩余次数: ∞")
@@ -454,27 +425,11 @@ class FigurineProPlugin(Star):
             if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
             if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
                                                                                                    []): return
-            user_count = self._get_user_count(sender_id)
-            group_count = self._get_group_count(group_id) if group_id else 0
-            user_limit_on = self.conf.get("enable_user_limit", True)
-            group_limit_on = self.conf.get("enable_group_limit", False) and group_id
-            
-            # 修复次数限制逻辑（与图生图保持一致）
-            if group_id:
-                if user_limit_on and group_limit_on:
-                    if user_count <= 0 and group_count <= 0:
-                        yield event.plain_result("❌ 本群次数与您的个人次数均已用尽。\n请使用「辉宝赐福」获取次数。")
-                        return
-                elif user_limit_on and user_count <= 0:
-                    yield event.plain_result("❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。")
-                    return
-                elif group_limit_on and group_count <= 0:
-                    yield event.plain_result("❌ 本群次数已用尽。\n请联系管理员增加群组次数。")
-                    return
-            else:
-                if user_limit_on and user_count <= 0:
-                    yield event.plain_result("❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。")
-                    return
+            # 次数配额检查（与图生图 / LLM 工具共用 _check_usage_quota）
+            err = self._check_usage_quota(sender_id, group_id)
+            if err:
+                yield event.plain_result(err)
+                return
 
         display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
         slot_acquired = False
@@ -496,11 +451,8 @@ class FigurineProPlugin(Star):
 
             if isinstance(res, bytes):
                 if not is_master:
-                    # 扣除次数
-                    if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
-                        await self._decrease_group_count(group_id)
-                    elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
-                        await self._decrease_user_count(sender_id)
+                    # 扣除次数（群组优先于个人，管理员豁免）
+                    await self._consume_quota(sender_id, group_id)
 
                 caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"模型: {used_model}"]
                 if is_master:
@@ -626,6 +578,37 @@ class FigurineProPlugin(Star):
         group_id_str = str(group_id)
         count = self._get_group_count(group_id_str)
         if count > 0: self.group_counts[group_id_str] = count - 1; await self._save_group_counts()
+
+    def _check_usage_quota(self, sender_id: str, group_id: Optional[str]) -> str | None:
+        """检查次数配额，返回拒绝原因文案；None=可用。管理员豁免由调用方保证。"""
+        user_count = self._get_user_count(sender_id)
+        group_count = self._get_group_count(group_id) if group_id else 0
+        user_limit_on = self.conf.get("enable_user_limit", True)
+        group_limit_on = self.conf.get("enable_group_limit", False) and group_id
+
+        if group_id:
+            # 群聊：两种限制都开启时，需要至少一种有次数
+            if user_limit_on and group_limit_on:
+                if user_count <= 0 and group_count <= 0:
+                    return "❌ 本群次数与您的个人次数均已用尽。\n请使用「辉宝赐福」获取次数。"
+            elif user_limit_on and user_count <= 0:
+                # 只开启用户限制，用户次数为0
+                return "❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。"
+            elif group_limit_on and group_count <= 0:
+                # 只开启群组限制，群组次数为0
+                return "❌ 本群次数已用尽。\n请联系管理员增加群组次数。"
+        else:
+            # 私聊：只检查用户限制
+            if user_limit_on and user_count <= 0:
+                return "❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。"
+        return None
+
+    async def _consume_quota(self, sender_id: str, group_id: Optional[str]) -> None:
+        """生成成功后扣减次数：群组优先于个人（管理员豁免由调用方保证）。"""
+        if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
+            await self._decrease_group_count(group_id)
+        elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
+            await self._decrease_user_count(sender_id)
 
     async def _load_user_checkin_data(self):
         if not self.user_checkin_file.exists(): self.user_checkin_data = {}; return
@@ -843,12 +826,32 @@ class FigurineProPlugin(Star):
             Args:
                 prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
             """
-            # 注意：本工具由主对话 LLM 自主调用，有意不扣次数、不查黑白名单、不占群槽位（自用设计）
-            res, used_model = await self._call_api([], prompt, image_size=None, group_id=event.get_group_id())
+            # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
+            # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
+            sender_id = event.get_sender_id()
+            group_id = event.get_group_id()
+            if not self.is_global_admin(event):
+                err = self._check_usage_quota(sender_id, group_id)
+                if err:
+                    # 先发用户（立刻看到原因），再 yield 文本回传 LLM 让它知晓
+                    yield event.plain_result(err)
+                    yield f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
+                    return
+            res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id)
             if isinstance(res, bytes):
+                if not self.is_global_admin(event):
+                    await self._consume_quota(sender_id, group_id)
+                # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
+                if self.conf.get("enable_user_limit", True):
+                    remaining = self._get_user_count(sender_id)
+                else:
+                    remaining = self._get_group_count(group_id) if group_id else 0
+                # 先发图给用户，再 yield 文本回传 LLM 告知剩余次数
                 yield event.chain_result([Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")])
+                yield f"图片已生成完毕，该用户当前剩余次数: {remaining}。"
             else:
                 yield event.plain_result(f"❌ 生成失败: {res}")
+                yield f"生图失败：{res}"
 
     async def _get_api_key(self) -> str | None:
         keys = self.conf.get("api_keys", [])
