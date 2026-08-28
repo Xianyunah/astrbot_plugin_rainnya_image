@@ -5,7 +5,7 @@ import io
 import json
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -13,7 +13,7 @@ import aiohttp
 from PIL import Image as PILImage
 
 from astrbot import logger
-from astrbot.api.event import filter
+from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Reply, Plain
@@ -180,6 +180,10 @@ class FigurineProPlugin(Star):
         self.user_checkin_data: Dict[str, str] = {}
         self.group_model_file = self.plugin_data_dir / "group_model.json"
         self.group_models: Dict[str, str] = {}
+        self.generation_history_file = self.plugin_data_dir / "generation_history.json"
+        self.generation_history: List[Dict[str, Any]] = []
+        self._history_lock = asyncio.Lock()  # 生图时间线并发追加/落盘锁
+        self._log_page_msgid: Dict[Any, Any] = {}  # (会话, 发送者) -> {"msgid": 消息id, "page": 页码, "scope": 范围, "count": 条数}
         self.prompt_map: Dict[str, str] = {}
         self.key_index = 0
         self.key_lock = asyncio.Lock()
@@ -219,6 +223,7 @@ class FigurineProPlugin(Star):
         if len(self.available_models) > 1:
             logger.info(f"NewImage: 检测到 {len(self.available_models)} 个可用模型，可通过「切换模型」指令在群内切换")
         await self._load_group_models()
+        await self._load_generation_history()
         self.api_timeout = max(10, int(self.conf.get("api_timeout", 120)))
         logger.info(f"NewImage: API请求超时时间设置为 {self.api_timeout}s")
         # 加载用户持有次数上限
@@ -383,6 +388,11 @@ class FigurineProPlugin(Star):
                 if not is_master:
                     # 扣除次数（群组优先于个人，管理员豁免）
                     await self._consume_quota(sender_id, group_id)
+                # 落盘 + 记录时间线
+                try:
+                    await self._save_generation(group_id, sender_id, user_prompt, used_model, res)
+                except Exception as e:
+                    logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
                 caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}", f"模型: {used_model}"]
                 if is_master:
                     caption_parts.append("剩余次数: ∞")
@@ -453,6 +463,11 @@ class FigurineProPlugin(Star):
                 if not is_master:
                     # 扣除次数（群组优先于个人，管理员豁免）
                     await self._consume_quota(sender_id, group_id)
+                # 落盘 + 记录时间线
+                try:
+                    await self._save_generation(group_id, sender_id, prompt, used_model, res)
+                except Exception as e:
+                    logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
 
                 caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"模型: {used_model}"]
                 if is_master:
@@ -652,6 +667,90 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"保存群组模型文件时发生错误: {e}", exc_info=True)
 
+    async def _load_generation_history(self):
+        """加载生图时间线记录列表（每条 {timestamp, group_id, user_id, prompt, model, file_path}）"""
+        if not self.generation_history_file.exists(): self.generation_history = []; return
+        loop = asyncio.get_running_loop()
+        try:
+            content = await loop.run_in_executor(None, self.generation_history_file.read_text, "utf-8")
+            data = await loop.run_in_executor(None, json.loads, content)
+            if isinstance(data, list): self.generation_history = data
+        except Exception as e:
+            logger.error(f"加载生图时间线文件时发生错误: {e}", exc_info=True);
+            self.generation_history = []
+
+    async def _save_generation_history(self):
+        """保存生图时间线记录列表"""
+        loop = asyncio.get_running_loop()
+        try:
+            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, self.generation_history,
+                                                                           ensure_ascii=False, indent=4))
+            await loop.run_in_executor(None, self.generation_history_file.write_text, json_data, "utf-8")
+        except Exception as e:
+            logger.error(f"保存生图时间线文件时发生错误: {e}", exc_info=True)
+
+    async def _append_generation_history(self, record: Dict[str, Any]) -> None:
+        """向生图时间线追加一条记录，超过 500 条时删除最旧的。"""
+        # 加锁防止多群/并发生图时 read-modify-write 丢记录
+        async with self._history_lock:
+            self.generation_history.append(record)
+            if len(self.generation_history) > 500:
+                self.generation_history = self.generation_history[-500:]
+            await self._save_generation_history()
+
+    async def _save_generation(self, group_id: Optional[str], user_id: str, prompt: str, model: str,
+                               image_bytes: bytes) -> str:
+        """保存生图结果到磁盘并记录时间线，返回文件绝对路径。
+
+        目录: StarTools.get_data_dir()/generations/<group_id|private>/<时间戳>.png
+        时间戳: %Y%m%d_%H%M%S_%f（含微秒，基本不会重复）；仍保留存在性检查随机后缀兜底；
+        group_id 为空/私聊用 private
+        """
+        loop = asyncio.get_running_loop()
+        dir_name = str(group_id) if group_id else "private"
+        gen_dir = self.plugin_data_dir / "generations" / dir_name
+        try:
+            await loop.run_in_executor(None, functools.partial(gen_dir.mkdir, parents=True, exist_ok=True))
+        except Exception as e:
+            logger.error(f"[NewImage] 创建生图目录失败: {e}", exc_info=True)
+            return ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_path = gen_dir / f"{ts}.png"
+        if file_path.exists():
+            # 极端情况下（同一微秒）仍追加随机后缀兜底
+            file_path = gen_dir / f"{ts}_{random.randint(1000, 9999)}.png"
+        try:
+            await loop.run_in_executor(None, file_path.write_bytes, image_bytes)
+        except Exception as e:
+            logger.error(f"[NewImage] 保存生图文件失败: {e}", exc_info=True)
+            return ""
+        logger.info(f"[NewImage] 生图已保存: {file_path}")
+        # 记录时间线
+        await self._append_generation_history({
+            "timestamp": ts,
+            "group_id": str(group_id) if group_id else "",
+            "user_id": str(user_id),
+            "prompt": prompt,
+            "model": model,
+            "file_path": str(file_path),
+        })
+        return str(file_path)
+
+    async def _recall_log_message(self, event: AstrMessageEvent, message_id):
+        """撤回之前发送的日志消息（仅支持 aiocqhttp 平台；拿不到消息 id 则跳过）"""
+        if not message_id:
+            return
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return
+        try:
+            # 兼容 bot.call_action 与 bot.api.call_action 两种形态
+            call = getattr(bot, "call_action", None) or getattr(getattr(bot, "api", None), "call_action", None)
+            if call:
+                await call("delete_msg", message_id=message_id)
+        except Exception as e:
+            logger.error(f"[NewImage] 撤回日志消息失败: {e}", exc_info=True)
+
     @filter.regex(r"^[#/!！]?辉宝赐福\s*$")
     async def on_checkin(self, event: AstrMessageEvent):
         """每日签到获取生图次数 - 支持直接发送"辉宝赐福"触发"""
@@ -818,6 +917,147 @@ class FigurineProPlugin(Star):
             return
         yield event.plain_result("格式: >>切换模型 <序号>")
 
+    @filter.command("生图日志", prefix_optional=True)
+    async def on_generation_log(self, event: AstrMessageEvent):
+        """查询/删除生图日志（仅管理员）"""
+        if not self.is_global_admin(event): return
+        usage = ("📋 生图日志用法：\n"
+                 "查询 [条数] [页码]\n"
+                 "查询 全局 [条数] [页码]\n"
+                 "单条查询 <时间戳>\n"
+                 "删除 <时间戳>\n"
+                 "删除 <群号|全局> <开始时间戳> <结束时间戳>")
+        raw = event.message_str.strip()
+        raw = raw.removeprefix("生图日志").strip()  # AstrBot 4.27.2 message_str 带指令名，需手动剥名
+        if not raw:
+            yield event.plain_result(usage)
+            return
+        parts = raw.split()
+        action = parts[0]
+        if action == "查询":
+            await self._handle_log_query(event, parts[1:])
+            return
+        if action == "单条查询":
+            if len(parts) < 2:
+                yield event.plain_result("格式: 生图日志 单条查询 <时间戳>")
+                return
+            record = next((r for r in self.generation_history if r.get("timestamp") == parts[1]), None)
+            if not record:
+                yield event.plain_result(f"❌ 未找到时间戳为 {parts[1]} 的生图记录。")
+                return
+            info = (f"🖼 生图记录详情\n"
+                    f"时间戳: {record.get('timestamp')}\n"
+                    f"群号: {record.get('group_id') or 'private'}\n"
+                    f"请求者: {record.get('user_id')}\n"
+                    f"模型: {record.get('model')}\n"
+                    f"文件: {record.get('file_path')}\n"
+                    f"完整提示词: {record.get('prompt')}")
+            chain = [Plain(info)]
+            fp = record.get("file_path") or ""
+            if fp and Path(fp).is_file():
+                chain.append(Image.fromFileSystem(fp))
+            try:
+                await event.send(MessageChain(chain=chain))
+            except Exception as e:
+                logger.error(f"[NewImage] 发送单条生图日志失败: {e}", exc_info=True)
+            return
+        if action == "删除":
+            if len(parts) == 2:
+                ts = parts[1]
+                before = len(self.generation_history)
+                self.generation_history = [r for r in self.generation_history if r.get("timestamp") != ts]
+                removed = before - len(self.generation_history)
+                if removed:
+                    await self._save_generation_history()
+                    yield event.plain_result(f"✅ 已删除 {removed} 条时间戳为 {ts} 的生图记录。")
+                else:
+                    yield event.plain_result(f"❌ 未找到时间戳为 {ts} 的生图记录。")
+                return
+            if len(parts) == 4:
+                scope_key, start_ts, end_ts = parts[1], parts[2], parts[3]
+                remaining = []
+                for r in self.generation_history:
+                    r_ts = r.get("timestamp", "")
+                    in_range = start_ts <= r_ts <= end_ts  # %Y%m%d_%H%M%S_%f 时间戳按字符串比较即时间序（含微秒基本唯一）
+                    in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
+                    if not (in_range and in_scope):
+                        remaining.append(r)
+                removed = len(self.generation_history) - len(remaining)
+                self.generation_history = remaining
+                if removed:
+                    await self._save_generation_history()
+                    yield event.plain_result(f"✅ 已删除 {removed} 条生图记录（范围: {scope_key}, {start_ts} ~ {end_ts}）。")
+                else:
+                    yield event.plain_result(f"❌ 该范围内没有生图记录。")
+                return
+            yield event.plain_result("格式: 生图日志 删除 <时间戳> 或 删除 <群号|全局> <开始时间戳> <结束时间戳>")
+            return
+        yield event.plain_result(usage)
+
+    async def _handle_log_query(self, event: AstrMessageEvent, args: List[str]) -> None:
+        """处理生图日志「查询」子命令：本群/全局、条数(≤20)、每页10条翻页，翻页时先撤回上一条日志消息再发新页。"""
+        async def _send(msg: str):
+            try:
+                await event.send(MessageChain(chain=[Plain(msg)]))
+            except Exception as e:
+                logger.error(f"[NewImage] 发送生图日志失败: {e}", exc_info=True)
+
+        scope = "group"
+        count = 10
+        page = 1
+        if args and args[0] == "全局":
+            scope = "global"
+            args = args[1:]
+        if args:
+            try:
+                count = max(1, min(int(args[0]), 20))
+            except ValueError:
+                await _send("❌ 条数格式错误（应为数字，最大 20）。")
+                return
+        if len(args) > 1:
+            try:
+                page = max(1, int(args[1]))
+            except ValueError:
+                await _send("❌ 页码格式错误（应为数字）。")
+                return
+        group_id = event.get_group_id()
+        # 时间倒序（最新在前）：generation_history 为 append 顺序，最新在末尾
+        records = list(reversed(self.generation_history))
+        if scope == "group" and group_id:
+            records = [r for r in records if str(r.get("group_id", "")) == str(group_id)]
+        records = records[:count]
+        total_pages = max(1, (len(records) + 9) // 10)
+        if page > total_pages:
+            page = total_pages
+        start = (page - 1) * 10
+        page_records = records[start:start + 10]
+        if not page_records:
+            await _send("📭 暂无生图日志。")
+            return
+        lines = []
+        for r in page_records:
+            prompt_short = str(r.get("prompt", ""))[:15]
+            lines.append(f"{r.get('timestamp','?')} | {r.get('file_path','?')} | {prompt_short} | "
+                         f"{r.get('group_id','') or 'private'} | {r.get('user_id','?')}")
+        msg = (f"📋 生图日志（第 {page}/{total_pages} 页，本页 {len(page_records)} 条，"
+               f"范围: {'全局' if scope == 'global' else '本群'}）\n" + "\n".join(lines))
+        session_id = event.get_session_id()
+        key = (session_id, event.get_sender_id())  # (会话, 发送者) 作键，避免群内跨用户误撤回
+        prev = self._log_page_msgid.get(key)
+        if page > 1 and prev and prev.get("scope") == scope and prev.get("count") == count:
+            # 翻页：先撤回上一条日志消息，再发新页
+            # 注：AstrBot 4.27.2 的 event.send 不返回消息 id（返回 None），msgid 恒为 None，
+            # _recall_log_message 会因 message_id 为空而自然跳过，实际降级为「直接发新页」；
+            # 保留调用与存储结构，供未来平台 API 返回消息 id 时自动启用撤回
+            await self._recall_log_message(event, prev.get("msgid"))
+        try:
+            sent_id = await event.send(MessageChain(chain=[Plain(msg)]))
+        except Exception as e:
+            logger.error(f"[NewImage] 发送生图日志失败: {e}", exc_info=True)
+            return
+        # 记录当前日志消息 id 供后续翻页撤回（event.send 返回 None 时即不可撤回）
+        self._log_page_msgid[key] = {"msgid": sent_id, "page": page, "scope": scope, "count": count}
+
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
         async def generate_image(self, event: AstrMessageEvent, prompt: str):
@@ -828,30 +1068,109 @@ class FigurineProPlugin(Star):
             """
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
+            # 注意：llm_tool 工具是纯协程（函数体内不能有 yield），发消息给用户用 event.send，return 文本回传 LLM
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
             if not self.is_global_admin(event):
                 err = self._check_usage_quota(sender_id, group_id)
                 if err:
-                    # 先发用户（立刻看到原因），再 yield 文本回传 LLM 让它知晓
-                    yield event.plain_result(err)
-                    yield f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
-                    return
+                    # 先发用户（立刻看到原因），再 return 文本回传 LLM 让它知晓
+                    try:
+                        await event.send(MessageChain(chain=[Plain(err)]))
+                    except Exception as e:
+                        logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
+                    return f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
             res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id)
             if isinstance(res, bytes):
                 if not self.is_global_admin(event):
                     await self._consume_quota(sender_id, group_id)
+                # 落盘 + 记录时间线
+                try:
+                    await self._save_generation(group_id, sender_id, prompt, used_model, res)
+                except Exception as e:
+                    logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
                 # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
                 if self.conf.get("enable_user_limit", True):
                     remaining = self._get_user_count(sender_id)
                 else:
                     remaining = self._get_group_count(group_id) if group_id else 0
-                # 先发图给用户，再 yield 文本回传 LLM 告知剩余次数
-                yield event.chain_result([Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")])
-                yield f"图片已生成完毕，该用户当前剩余次数: {remaining}。"
+                # 先发图给用户，再 return 文本回传 LLM 告知剩余次数
+                try:
+                    await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")]))
+                except Exception as e:
+                    logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
+                return f"图片已生成完毕，该用户当前剩余次数: {remaining}。"
             else:
-                yield event.plain_result(f"❌ 生成失败: {res}")
-                yield f"生图失败：{res}"
+                try:
+                    await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
+                except Exception as e:
+                    logger.error(f"[NewImage] 发送生图失败提示失败: {e}", exc_info=True)
+                return f"生图失败：{res}"
+
+        @filter.llm_tool(name="query_generation_quota")
+        async def query_generation_quota(self, event: AstrMessageEvent, user_id: str = ""):
+            """查询用户的生图次数配额（个人剩余次数与当前群剩余次数）。注意本工具不执行生图，仅查询。
+
+            Args:
+                user_id(string): 要查询的QQ号，留空则查当前对话用户
+            """
+            target = user_id.strip() if (user_id and user_id.strip()) else event.get_sender_id()
+            personal = self._get_user_count(target)
+            group_id = event.get_group_id()
+            group_remaining = self._get_group_count(group_id) if group_id else 0
+            user_limit_on = self.conf.get("enable_user_limit", True)
+            group_limit_on = self.conf.get("enable_group_limit", False)
+            return (f"用户 {target} 生图次数：个人剩余 {personal} 次（用户限制{'开' if user_limit_on else '关'}），"
+                    f"当前群剩余 {group_remaining} 次（群限制{'开' if group_limit_on else '关'}）。")
+
+        @filter.llm_tool(name="query_generation_history")
+        async def query_generation_history(self, event: AstrMessageEvent, scope: str = "本群", days: int = 0,
+                                           limit: int = 10):
+            """查询生图历史记录（每条包含时间戳、群号、提示词摘要、文件路径）。可用于回复用户「之前生过什么图」等。本工具不执行生图，仅查询。
+
+            Args:
+                scope(string): 查询范围，本群 或 全局，默认本群
+                days(number): 最近多少天内的记录，可选，默认不限
+                limit(number): 最多返回条数，默认 10，最大 20
+            """
+            scope_val = (scope or "").strip() or "本群"
+            try:
+                limit = max(1, min(int(limit) if limit else 10, 20))
+            except (TypeError, ValueError):
+                limit = 10
+            records = list(self.generation_history)
+            # 时间倒序（最新在前）：generation_history 为 append 顺序，最新在末尾
+            records = list(reversed(records))
+            # 范围过滤：默认本群（event.get_group_id() 为空则退化为全局）
+            if scope_val != "全局":
+                group_id = event.get_group_id()
+                if group_id:
+                    records = [r for r in records if str(r.get("group_id", "")) == str(group_id)]
+            # days 过滤：可选，按时间戳字符串解析比较
+            if days:
+                try:
+                    days = max(1, int(days))
+                except (TypeError, ValueError):
+                    days = 0
+                if days:
+                    cutoff = datetime.now() - timedelta(days=days)
+                    filtered = []
+                    for r in records:
+                        try:
+                            if datetime.strptime(str(r.get("timestamp", "")), "%Y%m%d_%H%M%S_%f") >= cutoff:
+                                filtered.append(r)
+                        except ValueError:
+                            continue
+                    records = filtered
+            records = records[:limit]
+            if not records:
+                return "暂无生图记录"
+            lines = []
+            for r in records:
+                prompt_short = str(r.get("prompt", ""))[:15]
+                lines.append(f"{r.get('timestamp','?')} | {r.get('group_id','') or 'private'} | {prompt_short} | "
+                             f"{r.get('file_path','?')}")
+            return "生图记录如下：\n" + "\n".join(lines)
 
     async def _get_api_key(self) -> str | None:
         keys = self.conf.get("api_keys", [])
