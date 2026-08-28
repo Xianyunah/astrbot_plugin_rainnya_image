@@ -15,7 +15,7 @@
     "model": {
         "description": "【手动配置】生图模型名称",
         "type": "string",
-        "hint": "仅当未选择上方提供商时使用。指定用于生图的模型名称。例如: google/gemini-2.0-flash-exp:free",
+        "hint": "可填写多个模型，每行一个，用 `>>切换模型` 指令在群内切换（仅管理员）",
         "default": "google/gemini-2.0-flash-exp:free"
     },
     "api_keys": {

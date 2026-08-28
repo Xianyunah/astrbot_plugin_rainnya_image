@@ -178,6 +178,8 @@ class FigurineProPlugin(Star):
         self.group_counts: Dict[str, int] = {}
         self.user_checkin_file = self.plugin_data_dir / "user_checkin.json"
         self.user_checkin_data: Dict[str, str] = {}
+        self.group_model_file = self.plugin_data_dir / "group_model.json"
+        self.group_models: Dict[str, str] = {}
         self.prompt_map: Dict[str, str] = {}
         self.key_index = 0
         self.key_lock = asyncio.Lock()
@@ -195,6 +197,8 @@ class FigurineProPlugin(Star):
         self.safety_level: str = ""
         self.default_image_size: str = ""
         self.hires_whitelist: List[str] = []
+        # 模型相关
+        self.available_models: List[str] = []  # 手动配置的可用模型列表（model 配置按行拆分，去空去重）
 
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
@@ -209,6 +213,12 @@ class FigurineProPlugin(Star):
         await self._load_user_counts()
         await self._load_group_counts()
         await self._load_user_checkin_data()
+        # 加载可用模型列表（model 配置支持多行填写，每行一个模型，去空去重）
+        raw_models = (self.conf.get("model", "") or "").split("\n")
+        self.available_models = list(dict.fromkeys([m.strip() for m in raw_models if m.strip()]))
+        if len(self.available_models) > 1:
+            logger.info(f"NewImage: 检测到 {len(self.available_models)} 个可用模型，可通过「切换模型」指令在群内切换")
+        await self._load_group_models()
         self.api_timeout = max(10, int(self.conf.get("api_timeout", 120)))
         logger.info(f"NewImage: API请求超时时间设置为 {self.api_timeout}s")
         # 加载用户持有次数上限
@@ -287,10 +297,14 @@ class FigurineProPlugin(Star):
             user_prompt = re.sub(r'@\S+?\(\d+\)', '', user_prompt).strip()
             user_prompt = re.sub(r'@\S+', '', user_prompt).strip()
             is_bnn = True
-            if not user_prompt: return
+            if not user_prompt:
+                yield event.plain_result("📝 用法：bnn <你的绘画想法>\n例如：bnn 樱花树下打伞的女孩")
+                return
             # 从 bnn 的自定义 prompt 中提取分辨率（仅白名单用户）
             user_prompt, extracted_size = self._extract_image_size(user_prompt, sender_id)
-            if not user_prompt: return
+            if not user_prompt:
+                yield event.plain_result("📝 用法：bnn <你的绘画想法>\n例如：bnn 樱花树下打伞的女孩")
+                return
         elif cmd in self.prompt_map:
             preset_prompt = self.prompt_map.get(cmd)
             extra_text = text.removeprefix(cmd).strip()
@@ -390,7 +404,7 @@ class FigurineProPlugin(Star):
                 yield event.plain_result(msg)
 
             start_time = datetime.now()
-            res = await self._call_api(images_to_process, user_prompt, image_size=extracted_size)
+            res, used_model = await self._call_api(images_to_process, user_prompt, image_size=extracted_size, group_id=group_id)
             elapsed = (datetime.now() - start_time).total_seconds()
             if isinstance(res, bytes):
                 if not is_master:
@@ -398,7 +412,7 @@ class FigurineProPlugin(Star):
                         await self._decrease_group_count(group_id)
                     elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
                         await self._decrease_user_count(sender_id)
-                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}"]
+                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}", f"模型: {used_model}"]
                 if is_master:
                     caption_parts.append("剩余次数: ∞")
                 else:
@@ -417,8 +431,9 @@ class FigurineProPlugin(Star):
     @filter.command("文生图", prefix_optional=True)
     async def on_text_to_image_request(self, event: AstrMessageEvent):
         prompt = event.message_str.strip()
+        prompt = prompt.removeprefix("文生图").strip()  # 剥指令名，完整保留多词描述，不依赖 parsed_params
         if not prompt:
-            yield event.plain_result("请提供文生图的描述。用法: #文生图 <描述>")
+            yield event.plain_result("📝 用法：文生图 <画面描述>\n例如：>>文生图 一个人走在樱花林中漫步")
             return
 
         sender_id = event.get_sender_id()
@@ -476,7 +491,7 @@ class FigurineProPlugin(Star):
 
             start_time = datetime.now()
             # 调用通用API，但传入空的图片列表
-            res = await self._call_api([], prompt, image_size=extracted_size)
+            res, used_model = await self._call_api([], prompt, image_size=extracted_size, group_id=group_id)
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if isinstance(res, bytes):
@@ -487,7 +502,7 @@ class FigurineProPlugin(Star):
                     elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
                         await self._decrease_user_count(sender_id)
 
-                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
+                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"模型: {used_model}"]
                 if is_master:
                     caption_parts.append("剩余次数: ∞")
                 else:
@@ -632,6 +647,28 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"保存用户签到文件时发生错误: {e}", exc_info=True)
 
+    async def _load_group_models(self):
+        """加载各群配置的生图模型映射 {群号: 模型名}"""
+        if not self.group_model_file.exists(): self.group_models = {}; return
+        loop = asyncio.get_running_loop()
+        try:
+            content = await loop.run_in_executor(None, self.group_model_file.read_text, "utf-8")
+            data = await loop.run_in_executor(None, json.loads, content)
+            if isinstance(data, dict): self.group_models = {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            logger.error(f"加载群组模型文件时发生错误: {e}", exc_info=True);
+            self.group_models = {}
+
+    async def _save_group_models(self):
+        """保存各群配置的生图模型映射 {群号: 模型名}"""
+        loop = asyncio.get_running_loop()
+        try:
+            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, self.group_models,
+                                                                           ensure_ascii=False, indent=4))
+            await loop.run_in_executor(None, self.group_model_file.write_text, json_data, "utf-8")
+        except Exception as e:
+            logger.error(f"保存群组模型文件时发生错误: {e}", exc_info=True)
+
     @filter.regex(r"^[#/!！]?辉宝赐福\s*$")
     async def on_checkin(self, event: AstrMessageEvent):
         """每日签到获取生图次数 - 支持直接发送"辉宝赐福"触发"""
@@ -762,6 +799,56 @@ class FigurineProPlugin(Star):
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
             yield event.plain_result("格式错误，请使用 #生图删除key <序号|all>")
+
+    @filter.command("切换模型", prefix_optional=True)
+    async def on_switch_model(self, event: AstrMessageEvent):
+        """按群切换生图模型（仅管理员）"""
+        if not self.is_global_admin(event): return
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("请在群聊中使用本指令")
+            return
+        if not self.available_models:
+            yield event.plain_result("📝 尚未配置可用生图模型，请在插件配置的「model」项中每行填写一个模型。")
+            return
+        param = event.message_str.strip()
+        param = param.removeprefix("切换模型").strip()  # 兼容 message_str 带/不带指令名
+        if not param:
+            # 无参数：列出模型列表
+            current = self.group_models.get(group_id, "")
+            lines = "\n".join(
+                f"[{idx}] {m}" + (" ← 当前" if m == current else "")
+                for idx, m in enumerate(self.available_models, 1)
+            )
+            yield event.plain_result(f"📋 本群可用生图模型：\n{lines}\n回复序号或输入 `>>切换模型 <序号>` 切换")
+            return
+        if param.isdigit():
+            idx = int(param)
+            if 1 <= idx <= len(self.available_models):
+                model = self.available_models[idx - 1]
+                self.group_models[group_id] = model
+                await self._save_group_models()
+                logger.info(f"[NewImage] 群 {group_id} 的模型已切换为: {model}")
+                yield event.plain_result(f"✅ 本群生图模型已切换为: {model}")
+                return
+            yield event.plain_result(f"❌ 序号超出范围（1-{len(self.available_models)}），请重新输入。")
+            return
+        yield event.plain_result("格式: >>切换模型 <序号>")
+
+    if hasattr(filter, "llm_tool"):
+        @filter.llm_tool(name="generate_image")
+        async def generate_image(self, event: AstrMessageEvent, prompt: str):
+            """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
+
+            Args:
+                prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
+            """
+            # 注意：本工具由主对话 LLM 自主调用，有意不扣次数、不查黑白名单、不占群槽位（自用设计）
+            res, used_model = await self._call_api([], prompt, image_size=None, group_id=event.get_group_id())
+            if isinstance(res, bytes):
+                yield event.chain_result([Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")])
+            else:
+                yield event.plain_result(f"❌ 生成失败: {res}")
 
     async def _get_api_key(self) -> str | None:
         keys = self.conf.get("api_keys", [])
@@ -967,8 +1054,14 @@ class FigurineProPlugin(Star):
                 return f"FALLBACK_URL:{found_urls[0]}"
             return None
 
-    async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None) -> bytes | str:
-        """调用 API 生成图像，支持 Gemini 原生 API 和 OpenAI 兼容格式双路由"""
+    async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
+                        group_id: Optional[str] = None) -> tuple:
+        """调用 API 生成图像，支持 Gemini 原生 API 和 OpenAI 兼容格式双路由。
+
+        返回 (result, model_name) 二元组：
+            - result: bytes=生图成功 / str=失败原因
+            - model_name: 本次实际使用的模型名（错误早退路径可能为 ""）
+        """
         
         # ========== 公共：确定 API URL、Key 和 模型 ==========
         api_url: str = ""
@@ -998,27 +1091,39 @@ class FigurineProPlugin(Star):
         if not api_url:
             api_url_raw = (self.conf.get("api_url") or "").strip()
             if not api_url_raw:
-                return "❌ 未选择提供商，且未配置手动 API URL"
+                return "❌ 未选择提供商，且未配置手动 API URL", ""
             api_url = api_url_raw
             logger.info(f"[NewImage] 使用手动配置 API URL")
         
         if not api_key:
             api_key = await self._get_api_key()
             if not api_key:
-                return "❌ 未选择提供商，且未配置手动 API Key"
+                return "❌ 未选择提供商，且未配置手动 API Key", ""
         
-        if not model_name:
-            model_name = self.conf.get("model", "").strip()
-            if not model_name:
-                return "❌ 未选择提供商，且未配置手动模型名称"
-        
+        # ========== 模型选择优先级：本群配置模型 > provider 模型 > 手动 available_models[0] 兜底 ==========
+        if group_id and self.group_models.get(group_id):
+            # 1. 本群通过「切换模型」指令配置的模型（最高优先）
+            model_name = self.group_models[group_id]
+            logger.info(f"[NewImage] 使用本群 {group_id} 配置的模型: {model_name}")
+        elif not model_name:
+            # 2. provider 未提供模型（或未使用 provider）时，回退到手动配置
+            if self.available_models:
+                # 2a. 手动配置的默认模型（model 配置中第一个）
+                model_name = self.available_models[0]
+                logger.info(f"[NewImage] 使用手动配置的默认模型: {model_name}")
+            else:
+                # 2b. 兜底 conf.model（兼容初始化未完成等场景）
+                model_name = (self.conf.get("model", "") or "").strip()
+                if not model_name:
+                    return "❌ 未选择提供商，且未配置手动模型名称", ""
+
         source_info = f"提供商:{self.provider_id}" if (self.provider_id and self.provider) else "手动配置"
         
         # ========== 根据开关选择路由 ==========
         if self.is_gemini_api:
-            return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt, image_size, source_info)
+            return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt, image_size, source_info), model_name
         else:
-            return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt, source_info)
+            return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt, source_info), model_name
 
     async def _call_gemini_api(self, api_url: str, api_key: str, model_name: str,
                                 image_bytes_list: List[bytes], prompt: str,
