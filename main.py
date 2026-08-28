@@ -517,12 +517,29 @@ class FigurineProPlugin(Star):
             if keyword.startswith(prefix_symbol):
                 keyword = keyword[len(prefix_symbol):].strip()
         if keyword in {"", "lm帮助", "lmh", "生图帮助"}:
-            msg = "📸 【生图插件帮助】\n\n"
-            msg += "🎨 图生图预设指令:\n"
-            msg += "、".join(self.prompt_map.keys())
-            msg += "\n\n✏️ 纯文本生图指令:\n#文生图 <你的描述>"
-            msg += "\n\n💡 使用方法:\n发送图片 + 预设指令 或 @用户 + 预设指令 来进行图生图。"
-            msg += "\n\n🎁 每日签到:\n发送「辉宝赐福」获取免费次数"
+            # 优先使用配置面板自定义的帮助菜单内容（help_menu），留空则用默认
+            custom = (self.conf.get("help_menu") or "").strip()
+            if custom:
+                yield event.plain_result(custom)
+                return
+            msg = "📸 【NewImage 生图帮助】\n\n"
+            msg += "🎨 图生图：发送图片 + 预设指令\n"
+            msg += ">>手办化 / >>Q版化 / >>cos化 / >>真人化\n"
+            msg += ">>痛车化 / >>痛屋化 / >>玩偶化 / >>贴纸化\n"
+            msg += ">>三视图 / >>角色设定 / >>高清修复 / >>鬼图 等 40+ 预设\n"
+            msg += "（>>生图帮助 <预设名> 可查看该预设的提示词）\n\n"
+            msg += "✏️ 文生图：\n"
+            msg += ">>文生图 <画面描述>\n\n"
+            msg += "🎨 自定义图生图：\n"
+            msg += "bnn <你的绘画想法>（可一次带多张图）\n\n"
+            msg += "🎁 次数与签到：\n"
+            msg += "发送「辉宝赐福」—— 每日签到领次数\n"
+            msg += ">>生图查询次数 —— 查询剩余次数\n\n"
+            msg += "👑 管理员：\n"
+            msg += ">>切换模型 <序号> —— 按群切换生图模型\n"
+            msg += ">>生图日志 —— 生图时间线记录（查询/删除）\n"
+            msg += ">>预设添加 <名称>:<提示词> —— 增改预设\n"
+            msg += ">>生图增加用户次数 / >>生图增加群组次数"
             yield event.plain_result(msg)
             return
 
