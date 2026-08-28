@@ -536,6 +536,11 @@ class FigurineProPlugin(Star):
         admin_ids = self.context.get_config().get("admins_id", [])
         return event.get_sender_id() in admin_ids
 
+    def _is_admin_id(self, uid: str) -> bool:
+        """判断某 QQ 号是否为全局管理员（用于查询时显示豁免）。"""
+        admin_ids = self.context.get_config().get("admins_id", [])
+        return str(uid) in [str(x) for x in admin_ids]
+
     async def _load_user_counts(self):
         if not self.user_counts_file.exists(): self.user_counts = {}; return
         loop = asyncio.get_running_loop()
@@ -842,9 +847,12 @@ class FigurineProPlugin(Star):
             else:
                 match = re.search(r"(\d+)", event.message_str)
                 if match: user_id_to_query = match.group(1)
-        user_count = self._get_user_count(user_id_to_query)
-        reply_msg = f"用户 {user_id_to_query} 个人剩余次数为: {user_count}"
-        if user_id_to_query == event.get_sender_id(): reply_msg = f"您好，您当前个人剩余次数为: {user_count}"
+        if self._is_admin_id(user_id_to_query):
+            personal_display = "∞（管理员豁免）"
+        else:
+            personal_display = str(self._get_user_count(user_id_to_query))
+        reply_msg = f"用户 {user_id_to_query} 个人剩余次数为: {personal_display}"
+        if user_id_to_query == event.get_sender_id(): reply_msg = f"您好，您当前个人剩余次数为: {personal_display}"
         if group_id := event.get_group_id(): reply_msg += f"\n本群共享剩余次数为: {self._get_group_count(group_id)}"
         yield event.plain_result(reply_msg)
 
@@ -1099,7 +1107,7 @@ class FigurineProPlugin(Star):
                     await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")]))
                 except Exception as e:
                     logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
-                return f"图片已生成完毕，该用户当前剩余次数: {remaining}。"
+                return f"图片已生成完毕，且已自动发送到当前会话（工具已自动发送图片，请勿再重复发送图片）。该用户当前剩余次数: {remaining}。"
             else:
                 try:
                     await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
@@ -1115,12 +1123,15 @@ class FigurineProPlugin(Star):
                 user_id(string): 要查询的QQ号，留空则查当前对话用户
             """
             target = user_id.strip() if (user_id and user_id.strip()) else event.get_sender_id()
-            personal = self._get_user_count(target)
+            if self._is_admin_id(target):
+                personal_display = "∞（管理员豁免）"
+            else:
+                personal_display = str(self._get_user_count(target))
             group_id = event.get_group_id()
             group_remaining = self._get_group_count(group_id) if group_id else 0
             user_limit_on = self.conf.get("enable_user_limit", True)
             group_limit_on = self.conf.get("enable_group_limit", False)
-            return (f"用户 {target} 生图次数：个人剩余 {personal} 次（用户限制{'开' if user_limit_on else '关'}），"
+            return (f"用户 {target} 生图次数：个人剩余 {personal_display} 次（用户限制{'开' if user_limit_on else '关'}），"
                     f"当前群剩余 {group_remaining} 次（群限制{'开' if group_limit_on else '关'}）。")
 
         @filter.llm_tool(name="query_generation_history")
