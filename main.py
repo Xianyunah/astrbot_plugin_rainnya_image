@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 from astrbot import logger
 from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -19,6 +20,110 @@ from astrbot.core.provider import Provider
 from .image_parser import extract_image_bytes_from_response
 from .image_workflow import ImageWorkflow
 from .storage import load_json, save_json
+
+
+# ========== 模型详细生成参数 Schema（模块级） ==========
+# 每项定义：类型 / 范围(min,max) / 可选值(choices) / 长度上限(max_len)
+PARAM_SCHEMA = {
+    "size":             {"type": "str",   "choices": ["1K", "2K", "4K"]},
+    "temperature":      {"type": "float", "min": 0.0, "max": 2.0},
+    "max_tokens":       {"type": "int",   "min": 64,  "max": 16384},
+    "steps":            {"type": "int",   "min": 1,   "max": 150},
+    "negative_prompt":  {"type": "str",   "max_len": 500},
+}
+# 预留：模型配置中以 params.xxx 透传的自定义键（当前为空）
+PASSTHROUGH_PARAM_KEYS = set()
+
+# 指令文本中提取 `键:值` 参数的正则（键为已知参数名才提取；引号包裹的值允许空格/冒号）
+_PARAM_EXTRACT_RE = re.compile(r'(?<![\w])([a-z_]+):("(?:[^"\\]|\\.)*"|[^\s:]+)')
+
+# 各参数校验失败时的错误文案模板
+_PARAM_ERROR_MSGS = {
+    "size": "参数 size 取值无效，可选：1K/2K/4K",
+    "temperature": "参数 temperature 超出范围（0.0-2.0）",
+    "max_tokens": "参数 max_tokens 超出范围（64-16384）",
+    "steps": "参数 steps 超出范围（1-150）",
+    "negative_prompt": "参数 negative_prompt 超出长度（≤500）",
+}
+
+
+def _coerce_param_value(key: str, value: Any, clamp: bool) -> tuple:
+    """校验/转换单个参数值；返回 (ok: bool, coerced: Any)。
+
+    clamp=True 时数值越界夹取到边界（LLM/合并用）；clamp=False 时越界判非法（指令/配置用）。
+    类型不合法、choices 不匹配、超长（clamp 时可截断）→ ok=False 或夹取后返回。
+    """
+    schema = PARAM_SCHEMA.get(key)
+    if not schema:
+        return False, None
+    ptype = schema["type"]
+    if ptype == "str":
+        if not isinstance(value, str):
+            return False, None
+        max_len = schema.get("max_len")
+        if max_len is not None and len(value) > max_len:
+            if clamp:
+                return True, value[:max_len]
+            return False, None
+        choices = schema.get("choices")
+        if choices and value not in choices:
+            return False, None
+        return True, value
+    if ptype == "float":
+        if isinstance(value, bool):
+            return False, None
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return False, None
+        mn, mx = schema["min"], schema["max"]
+        if val < mn or val > mx:
+            if clamp:
+                val = min(max(val, mn), mx)
+            else:
+                return False, None
+        return True, val
+    if ptype == "int":
+        if isinstance(value, bool):
+            return False, None
+        if isinstance(value, int):
+            val = value
+        elif isinstance(value, str) and re.fullmatch(r'-?\d+', value.strip()):
+            val = int(value.strip())
+        else:
+            return False, None
+        mn, mx = schema["min"], schema["max"]
+        if val < mn or val > mx:
+            if clamp:
+                val = min(max(val, mn), mx)
+            else:
+                return False, None
+        return True, val
+    return False, None
+
+
+def _merge_params(*dicts: Optional[Dict]) -> Dict:
+    """合并多份参数（后者覆盖前者），仅保留 PARAM_SCHEMA 已知键。"""
+    merged: Dict = {}
+    for d in dicts:
+        if not d or not isinstance(d, dict):
+            continue
+        for k, v in d.items():
+            if k in PARAM_SCHEMA:
+                merged[k] = v
+    return merged
+
+
+# 分辨率数值排序（用于 allowed_sizes 夹取到最大可用）
+_SIZE_RANK = {"1K": 1, "2K": 2, "4K": 3}
+_ALLOWED_SIZE_VALUES = tuple(_SIZE_RANK.keys())
+
+
+def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
+    """返回 allowed_sizes 中数值最大（4K>2K>1K）的分辨率；列表为空返回 None。"""
+    if not allowed_sizes:
+        return None
+    return max(allowed_sizes, key=lambda s: _SIZE_RANK.get(s, 0))
 
 
 @register(
@@ -64,7 +169,13 @@ class FigurineProPlugin(Star):
         self.default_image_size: str = ""
         self.hires_whitelist: List[str] = []
         # 模型相关
-        self.available_models: List[str] = []  # 手动配置的可用模型列表（model 配置按行拆分，去空去重）
+        # available_models: 手动配置的可用模型列表，元素为 {"name": 模型名, "quota": 每次消耗配额, "desc": 说明}
+        self.available_models: List[Dict[str, Any]] = []
+        # available_model_names: 仅模型名列表（供群配置/切换/取用，去重保持顺序）
+        self.available_model_names: List[str] = []
+        # Web API 相关（供插件 WebUI 调用）
+        self._web_registered = False
+        self._register_web_apis()
 
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
@@ -79,11 +190,13 @@ class FigurineProPlugin(Star):
         await self._load_user_counts()
         await self._load_group_counts()
         await self._load_user_checkin_data()
-        # 加载可用模型列表（model 配置支持多行填写，每行一个模型，去空去重）
-        raw_models = (self.conf.get("model", "") or "").split("\n")
-        self.available_models = list(dict.fromkeys([m.strip() for m in raw_models if m.strip()]))
-        if len(self.available_models) > 1:
-            logger.info(f"NewImage: 检测到 {len(self.available_models)} 个可用模型，可通过「切换模型」指令在群内切换")
+        # 加载可用模型列表（model 配置支持多行填写，每行格式：模型名;每次消耗配额;说明）
+        self._parse_available_models()
+        if self.available_models:
+            logger.info(f"NewImage: 已解析 {len(self.available_models)} 个可用模型（按每次消耗配额计次）")
+            for m in self.available_models:
+                _desc = f" - {m['desc']}" if m.get("desc") else ""
+                logger.info(f"  [{m['name']}] 每次消耗 {m['quota']} 次{_desc}")
         await self._load_group_models()
         await self._load_generation_history()
         self.api_timeout = max(10, int(self.conf.get("api_timeout", 120)))
@@ -130,6 +243,171 @@ class FigurineProPlugin(Star):
             if not self.conf.get("api_keys") and not self.conf.get("api_url"):
                 logger.warning("NewImage: 未配置提供商，也未配置手动API，插件可能无法工作")
 
+    def _parse_available_models(self) -> None:
+        """解析 model 配置（每行一个模型，格式：模型名;每次消耗配额;说明;{参数JSON}，分号分隔）。
+
+        兼容旧格式：只有模型名 → 配额 1、说明空；2 段 → 配额（非法则 1）；3 段 → 含说明。
+        第 4 段为参数 JSON（默认生成参数，可缺省）：只保留 PARAM_SCHEMA 中的键，
+        对已知键做类型/范围校验，非法或越界的丢弃（log.warning，配置数据宁可丢弃不报错）。
+        参数 JSON 里可含 `sizes` 键（模型允许分辨率限制，如 {"sizes":["1K"]}）：
+        识别后从 params 中移除并写入条目 allowed_sizes（None=不限制走全局；空数组视为不限制；
+        值非法则忽略该键 log.warning）。
+        模型名去重（保留顺序），重复名取第一条的配额/说明/参数。
+        """
+        self.available_models = []
+        self.available_model_names = []
+        seen: set = set()
+        raw_models = (self.conf.get("model", "") or "").split("\n")
+        for line in raw_models:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(";")
+            name = parts[0].strip()
+            if not name:
+                continue
+            quota = 1
+            desc = ""
+            params: Dict = {}
+            allowed_sizes: Optional[List[str]] = None
+            if len(parts) >= 2:
+                q_raw = parts[1].strip()
+                try:
+                    quota = max(1, int(q_raw))
+                except (TypeError, ValueError):
+                    quota = 1
+            if len(parts) >= 3:
+                desc = parts[2].strip()
+            if len(parts) >= 4:
+                raw_params = parts[3].strip()
+                if raw_params:
+                    try:
+                        parsed = json.loads(raw_params)
+                    except (ValueError, TypeError):
+                        logger.warning(f"[NewImage] 模型 {name} 的参数JSON解析失败，已忽略: {raw_params}")
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        # 先识别 sizes 键（模型允许分辨率限制），取出并从 params 中移除
+                        if "sizes" in parsed:
+                            sizes_raw = parsed.pop("sizes")
+                            if isinstance(sizes_raw, list) and sizes_raw == []:
+                                allowed_sizes = None  # 空数组视为不限制
+                            elif (isinstance(sizes_raw, list) and sizes_raw
+                                  and all(isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in sizes_raw)):
+                                allowed_sizes = list(dict.fromkeys(sizes_raw))  # 去重保序
+                            else:
+                                logger.warning(f"[NewImage] 模型 {name} 的 sizes 键非法，已忽略: {sizes_raw}")
+                        for pk, pv in parsed.items():
+                            if pk not in PARAM_SCHEMA:
+                                logger.warning(f"[NewImage] 模型 {name} 存在未知参数 {pk}，已忽略")
+                                continue
+                            ok, coerced = _coerce_param_value(pk, pv, clamp=False)
+                            if not ok:
+                                logger.warning(f"[NewImage] 模型 {name} 参数 {pk} 非法或越界，已丢弃")
+                                continue
+                            params[pk] = coerced
+            if name in seen:
+                continue  # 保留第一条的 quota/desc/params
+            seen.add(name)
+            self.available_models.append({"name": name, "quota": quota, "desc": desc, "params": params,
+                                          "allowed_sizes": allowed_sizes})
+            self.available_model_names.append(name)
+
+    def _get_model_entry(self, name: str) -> Optional[Dict]:
+        """按模型名查 available_models（含 params），找不到返回 None。"""
+        if not name:
+            return None
+        for m in self.available_models:
+            if m.get("name") == name:
+                return m
+        return None
+
+    def _get_model_quota(self, name: str) -> int:
+        """返回该模型每次生成消耗的配额（找不到返回 1）。"""
+        entry = self._get_model_entry(name)
+        return int(entry.get("quota", 1)) if entry else 1
+
+    def _get_model_desc(self, name: str) -> str:
+        """返回该模型说明（找不到返回空串）。"""
+        entry = self._get_model_entry(name)
+        return str(entry.get("desc", "")) if entry else ""
+
+    def _get_model_default_params(self, name: str) -> Dict:
+        """返回该模型默认生成参数（params 的副本；找不到或无参数返回空 dict）。"""
+        entry = self._get_model_entry(name)
+        if not entry:
+            return {}
+        return dict(entry.get("params") or {})
+
+    def _get_model_allowed_sizes(self, name: str) -> Optional[List[str]]:
+        """返回该模型允许的分辨率列表（None=不限制走全局 1K/2K/4K）。"""
+        entry = self._get_model_entry(name)
+        if not entry:
+            return None
+        return entry.get("allowed_sizes")
+
+    def _parse_and_validate_params(self, text: str, allowed_extra: Dict[str, str]) -> tuple:
+        """从指令文本中提取 `键:值` 生成参数。
+
+        返回 (params_dict, cleaned_text)：
+            - params_dict: 提取且校验通过的参数（仅 PARAM_SCHEMA 已知键 + allowed_extra 透传键）
+            - cleaned_text: 移除已提取参数后的 prompt 文本
+        校验失败返回 (None, 错误消息)。未知键不提取，留在原文本。
+        """
+        if not text:
+            return {}, text
+        params: Dict = {}
+        cleaned_parts: List[str] = []
+        last = 0
+        for m in _PARAM_EXTRACT_RE.finditer(text):
+            key, raw_val = m.group(1), m.group(2)
+            if key not in PARAM_SCHEMA and key not in allowed_extra:
+                continue
+            # 去掉引号（支持 "..." 包裹的值，允许空格/冒号）
+            if raw_val.startswith('"') and raw_val.endswith('"'):
+                try:
+                    val = json.loads(raw_val)
+                except (ValueError, TypeError):
+                    val = raw_val[1:-1]
+            else:
+                val = raw_val
+            if key in PARAM_SCHEMA:
+                ok, coerced = _coerce_param_value(key, val, clamp=False)
+                if not ok:
+                    return None, _PARAM_ERROR_MSGS.get(key, f"参数 {key} 无效")
+                params[key] = coerced
+            else:
+                # allowed_extra 透传键：原样保留
+                params[key] = val
+            cleaned_parts.append(text[last:m.start()])
+            last = m.end()
+        cleaned_parts.append(text[last:])
+        return params, "".join(cleaned_parts).strip()
+
+    def _sanitize_params(self, raw: Dict, source: str) -> tuple:
+        """对传入参数 dict（LLM 工具/Web API 等）做温和清洗。
+
+        逐键校验：数值越界夹取到边界；类型错/未知键丢弃。
+        返回 (清洗后 params, 丢弃键列表)。
+        """
+        if not isinstance(raw, dict):
+            logger.warning(f"[NewImage] {source} 传入参数必须是对象，已忽略")
+            return {}, []
+        cleaned: Dict = {}
+        dropped: List[str] = []
+        for k, v in raw.items():
+            if k not in PARAM_SCHEMA:
+                dropped.append(k)
+                continue
+            ok, coerced = _coerce_param_value(k, v, clamp=True)
+            if not ok:
+                dropped.append(k)
+                continue
+            cleaned[k] = coerced
+        if dropped:
+            logger.warning(f"[NewImage] {source} 参数被丢弃: {', '.join(map(str, dropped))}")
+        return cleaned, dropped
+
     async def _load_prompt_map(self):
         logger.info("正在加载 prompts...")
         self.prompt_map.clear()
@@ -158,6 +436,7 @@ class FigurineProPlugin(Star):
         user_prompt = ""
         is_bnn = False
         extracted_size = None  # 用户指定的分辨率参数
+        gen_params: Dict = {}  # 用户通过键:值显式指定的生成参数（显式 > 模型默认）
         if cmd == bnn_command:
             user_prompt = text.removeprefix(cmd).strip()
             # 清除 @ 文本残留
@@ -172,6 +451,16 @@ class FigurineProPlugin(Star):
             if not user_prompt:
                 yield event.plain_result("📝 用法：bnn <你的绘画想法>\n例如：bnn 樱花树下打伞的女孩")
                 return
+            # 提取生成参数（键:值），校验失败明确报错不生成
+            params, cleaned = self._parse_and_validate_params(user_prompt, {})
+            if params is None:
+                yield event.plain_result(f"❌ {cleaned}")
+                return
+            gen_params = params
+            user_prompt = cleaned
+            if not user_prompt:
+                yield event.plain_result("📝 用法：bnn <你的绘画想法> size:4K temperature:0.9")
+                return
         elif cmd in self.prompt_map:
             preset_prompt = self.prompt_map.get(cmd)
             extra_text = text.removeprefix(cmd).strip()
@@ -181,6 +470,13 @@ class FigurineProPlugin(Star):
             if extra_text:
                 # 从用户补充文本中提取分辨率（仅白名单用户）
                 extra_text, extracted_size = self._extract_image_size(extra_text, sender_id)
+                # 提取生成参数（键:值），校验失败明确报错不生成
+                params, cleaned_extra = self._parse_and_validate_params(extra_text, {})
+                if params is None:
+                    yield event.plain_result(f"❌ {cleaned_extra}")
+                    return
+                gen_params = params
+                extra_text = cleaned_extra
                 if extra_text:
                     user_prompt = f"{preset_prompt}\n\n[User Additional Instruction]: {extra_text}"
                 else:
@@ -244,7 +540,9 @@ class FigurineProPlugin(Star):
                 yield event.plain_result(msg)
 
             start_time = datetime.now()
-            res, used_model = await self._call_api(images_to_process, user_prompt, image_size=extracted_size, group_id=group_id)
+            res, used_model = await self._call_api(images_to_process, user_prompt, image_size=extracted_size,
+                                                   group_id=group_id, gen_params=gen_params or None,
+                                                   size_strict=True)
             elapsed = (datetime.now() - start_time).total_seconds()
             if isinstance(res, bytes):
                 if not is_master:
@@ -286,6 +584,11 @@ class FigurineProPlugin(Star):
         # 从文生图 prompt 中提取分辨率（仅白名单用户）
         extracted_size = None
         prompt, extracted_size = self._extract_image_size(prompt, sender_id)
+        # 提取生成参数（键:值），校验失败明确报错不生成
+        gen_params, prompt = self._parse_and_validate_params(prompt, {})
+        if gen_params is None:
+            yield event.plain_result(f"❌ {prompt}")
+            return
         if not prompt:
             yield event.plain_result("请提供文生图的描述（分辨率参数不能作为唯一输入）。")
             return
@@ -318,7 +621,8 @@ class FigurineProPlugin(Star):
 
             start_time = datetime.now()
             # 调用通用API，但传入空的图片列表
-            res, used_model = await self._call_api([], prompt, image_size=extracted_size, group_id=group_id)
+            res, used_model = await self._call_api([], prompt, image_size=extracted_size, group_id=group_id,
+                                                   gen_params=gen_params or None, size_strict=True)
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if isinstance(res, bytes):
@@ -433,10 +737,13 @@ class FigurineProPlugin(Star):
     def _get_user_count(self, user_id: str) -> int:
         return self.user_counts.get(str(user_id), 0)
 
-    async def _decrease_user_count(self, user_id: str):
+    async def _decrease_user_count(self, user_id: str, amount: int = 1):
         user_id_str = str(user_id)
+        amount = max(1, int(amount))
         count = self._get_user_count(user_id_str)
-        if count > 0: self.user_counts[user_id_str] = count - 1; await self._save_user_counts()
+        if count > 0:
+            self.user_counts[user_id_str] = max(0, count - amount)
+            await self._save_user_counts()
 
     async def _load_group_counts(self):
         data = await load_json(self.group_counts_file)
@@ -451,13 +758,21 @@ class FigurineProPlugin(Star):
     def _get_group_count(self, group_id: str) -> int:
         return self.group_counts.get(str(group_id), 0)
 
-    async def _decrease_group_count(self, group_id: str):
+    async def _decrease_group_count(self, group_id: str, amount: int = 1):
         group_id_str = str(group_id)
+        amount = max(1, int(amount))
         count = self._get_group_count(group_id_str)
-        if count > 0: self.group_counts[group_id_str] = count - 1; await self._save_group_counts()
+        if count > 0:
+            self.group_counts[group_id_str] = max(0, count - amount)
+            await self._save_group_counts()
 
-    def _check_usage_quota(self, sender_id: str, group_id: Optional[str]) -> str | None:
-        """检查次数配额，返回拒绝原因文案；None=可用。管理员豁免由调用方保证。"""
+    def _check_usage_quota(self, sender_id: str, group_id: Optional[str], quota: int = 1) -> str | None:
+        """检查次数配额，返回拒绝原因文案；None=可用。管理员豁免由调用方保证。
+
+        quota: 本次生成需消耗的次数（默认 1，多配额模型可传入更大值）。
+        语义：只要「个人次数 >= quota」或「群次数 >= quota」任一满足即放行（不叠加扣减）。
+        """
+        quota = max(1, int(quota))
         user_count = self._get_user_count(sender_id)
         group_count = self._get_group_count(group_id) if group_id else 0
         user_limit_on = self.conf.get("enable_user_limit", True)
@@ -466,26 +781,32 @@ class FigurineProPlugin(Star):
         if group_id:
             # 群聊：两种限制都开启时，需要至少一种有次数
             if user_limit_on and group_limit_on:
-                if user_count <= 0 and group_count <= 0:
-                    return "❌ 本群次数与您的个人次数均已用尽。\n请使用「辉宝赐福」获取次数。"
-            elif user_limit_on and user_count <= 0:
-                # 只开启用户限制，用户次数为0
-                return "❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。"
-            elif group_limit_on and group_count <= 0:
-                # 只开启群组限制，群组次数为0
-                return "❌ 本群次数已用尽。\n请联系管理员增加群组次数。"
+                if user_count < quota and group_count < quota:
+                    return (f"❌ 本群次数与您的个人次数均不足以生成（需 {quota} 次，"
+                            f"个人剩 {user_count}，群剩 {group_count}）。\n请使用「辉宝赐福」获取次数。")
+            elif user_limit_on and user_count < quota:
+                # 只开启用户限制，用户次数不足
+                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「辉宝赐福」获取次数。"
+            elif group_limit_on and group_count < quota:
+                # 只开启群组限制，群组次数不足
+                return f"❌ 本群次数不足（需 {quota} 次，当前剩余 {group_count}）。\n请联系管理员增加群组次数。"
         else:
             # 私聊：只检查用户限制
-            if user_limit_on and user_count <= 0:
-                return "❌ 您的使用次数已用完。\n请使用「辉宝赐福」获取次数。"
+            if user_limit_on and user_count < quota:
+                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「辉宝赐福」获取次数。"
         return None
 
-    async def _consume_quota(self, sender_id: str, group_id: Optional[str]) -> None:
-        """生成成功后扣减次数：群组优先于个人（管理员豁免由调用方保证）。"""
-        if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) > 0:
-            await self._decrease_group_count(group_id)
-        elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) > 0:
-            await self._decrease_user_count(sender_id)
+    async def _consume_quota(self, sender_id: str, group_id: Optional[str], count: int = 1) -> None:
+        """生成成功后扣减次数：群组优先于个人，单一来源扣减（管理员豁免由调用方保证）。
+
+        count: 本次生成实际消耗的次数（默认 1）。
+        语义：群次数 >= count 则扣群 count；否则若用户次数 >= count 则扣用户 count（与检查一致，不叠加）。
+        """
+        count = max(1, int(count))
+        if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) >= count:
+            await self._decrease_group_count(group_id, amount=count)
+        elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) >= count:
+            await self._decrease_user_count(sender_id, amount=count)
 
     async def _load_user_checkin_data(self):
         data = await load_json(self.user_checkin_file)
@@ -731,7 +1052,7 @@ class FigurineProPlugin(Star):
             # 无参数：列出模型列表
             current = self.group_models.get(group_id, "")
             lines = "\n".join(
-                f"[{idx}] {m}" + (" ← 当前" if m == current else "")
+                f"[{idx}] {m['name']}（消耗{m['quota']}次）" + (f" - {m['desc']}" if m.get("desc") else "") + (" ← 当前" if m["name"] == current else "")
                 for idx, m in enumerate(self.available_models, 1)
             )
             yield event.plain_result(f"📋 本群可用生图模型：\n{lines}\n回复序号或输入 `>>切换模型 <序号>` 切换")
@@ -739,7 +1060,7 @@ class FigurineProPlugin(Star):
         if param.isdigit():
             idx = int(param)
             if 1 <= idx <= len(self.available_models):
-                model = self.available_models[idx - 1]
+                model = self.available_models[idx - 1]["name"]
                 self.group_models[group_id] = model
                 await self._save_group_models()
                 logger.info(f"[NewImage] 群 {group_id} 的模型已切换为: {model}")
@@ -892,19 +1213,31 @@ class FigurineProPlugin(Star):
 
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
-        async def generate_image(self, event: AstrMessageEvent, prompt: str):
+        async def generate_image(self, event: AstrMessageEvent, prompt: str, model: str = "",
+                                 params: Optional[Dict] = None):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
 
             Args:
                 prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
+                model(string): 生图模型名（可留空，留空则用当前群默认模型；可用模型见配置面板 model 项说明）
+                params(object): 生图参数（可选，JSON对象，如 {"size":"4K","temperature":0.9}；可用键：size/temperature/max_tokens/steps/negative_prompt）
             """
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
             # 注意：llm_tool 工具是纯协程（函数体内不能有 yield），发消息给用户用 event.send，return 文本回传 LLM
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
+            # 确定最终模型：用户指定 > 本群配置模型 > 手动配置默认模型 > conf.model 兜底
+            final_model = (model or "").strip()
+            if not final_model:
+                final_model = self.group_models.get(group_id, "") if group_id else ""
+            if not final_model and self.available_model_names:
+                final_model = self.available_model_names[0]
+            if not final_model:
+                final_model = (self.conf.get("model", "") or "").strip()
+            quota = self._get_model_quota(final_model)
             if not self.is_global_admin(event):
-                err = self._check_usage_quota(sender_id, group_id)
+                err = self._check_usage_quota(sender_id, group_id, quota)
                 if err:
                     # 先发用户（立刻看到原因），再 return 文本回传 LLM 让它知晓
                     try:
@@ -913,11 +1246,20 @@ class FigurineProPlugin(Star):
                         logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                     return f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
             # 异步生图：立即返回给 LLM（不阻塞其回复），实际生成放后台任务，完成后自动发送到会话
-            asyncio.create_task(self._async_generate(event, prompt))
+            # 对 LLM 传入的 params 做温和清洗（夹取/丢弃），再传入后台任务
+            cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
+            asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
+                                                     params=cleaned_params))
             return "已开始生成图片，生成完成后会自动发送到当前会话，请稍候。"
 
-        async def _async_generate(self, event: AstrMessageEvent, prompt: str) -> None:
-            """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。"""
+        async def _async_generate(self, event: AstrMessageEvent, prompt: str, model: str = "", quota: int = 1,
+                                  params: Optional[Dict] = None) -> None:
+            """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。
+
+            model: 指定生图模型（可空，空则 _call_api 内部走默认选择逻辑）；
+            quota: 本次生成消耗的次数（与 _check_usage_quota / _consume_quota 的 quota 语义一致）；
+            params: 生成参数（已在 generate_image 清洗），在 _call_api 内与模型默认参数合并。
+            """
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
             slot_acquired = False
@@ -929,10 +1271,20 @@ class FigurineProPlugin(Star):
                         logger.error(f"[NewImage] 发送队列提示失败: {e}", exc_info=True)
                     return
                 slot_acquired = True
-                res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id)
+                # 二次校验配额（后台任务启动时可能已被并发任务扣减），失败则直接返回不发图
+                if not self.is_global_admin(event):
+                    err = self._check_usage_quota(sender_id, group_id, quota)
+                    if err:
+                        try:
+                            await event.send(MessageChain(chain=[Plain(err)]))
+                        except Exception as e:
+                            logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
+                        return
+                res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id,
+                                                       model_override=model or None, gen_params=params or None)
                 if isinstance(res, bytes):
                     if not self.is_global_admin(event):
-                        await self._consume_quota(sender_id, group_id)
+                        await self._consume_quota(sender_id, group_id, count=quota)
                     try:
                         await self._save_generation(group_id, sender_id, prompt, used_model, res)
                     except Exception as e:
@@ -1087,9 +1439,14 @@ class FigurineProPlugin(Star):
 
 
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
-                        group_id: Optional[str] = None) -> tuple:
+                        group_id: Optional[str] = None, model_override: Optional[str] = None,
+                        gen_params: Optional[Dict] = None, size_strict: bool = False) -> tuple:
         """调用 API 生成图像，支持 Gemini 原生 API 和 OpenAI 兼容格式双路由。
 
+        参数 model_override: LLM 工具指定模型用（优先级最高，覆盖本群配置/provider/默认模型）。
+        参数 gen_params: 生成参数（显式指定），在方法内与最终模型的默认参数合并（显式 > 模型默认）。
+        参数 size_strict: 模型 allowed_sizes 限制校验模式——True=指令路径（用户显式指定不支持分辨率
+            时报错拒绝）；False=LLM 路径（不支持时夹取到允许的最大分辨率，仅日志记录）。
         返回 (result, model_name) 二元组：
             - result: bytes=生图成功 / str=失败原因
             - model_name: 本次实际使用的模型名（错误早退路径可能为 ""）
@@ -1132,16 +1489,20 @@ class FigurineProPlugin(Star):
             if not api_key:
                 return "❌ 未选择提供商，且未配置手动 API Key", ""
         
-        # ========== 模型选择优先级：本群配置模型 > provider 模型 > 手动 available_models[0] 兜底 ==========
-        if group_id and self.group_models.get(group_id):
-            # 1. 本群通过「切换模型」指令配置的模型（最高优先）
+        # ========== 模型选择优先级：model_override > 本群配置模型 > provider 模型 > 手动 available_models[0] 兜底 ==========
+        if model_override:
+            # 0. LLM 工具指定模型（最高优先）
+            model_name = model_override
+            logger.info(f"[NewImage] 使用指定模型: {model_name}")
+        elif group_id and self.group_models.get(group_id):
+            # 1. 本群通过「切换模型」指令配置的模型
             model_name = self.group_models[group_id]
             logger.info(f"[NewImage] 使用本群 {group_id} 配置的模型: {model_name}")
         elif not model_name:
             # 2. provider 未提供模型（或未使用 provider）时，回退到手动配置
-            if self.available_models:
+            if self.available_model_names:
                 # 2a. 手动配置的默认模型（model 配置中第一个）
-                model_name = self.available_models[0]
+                model_name = self.available_model_names[0]
                 logger.info(f"[NewImage] 使用手动配置的默认模型: {model_name}")
             else:
                 # 2b. 兜底 conf.model（兼容初始化未完成等场景）
@@ -1150,17 +1511,50 @@ class FigurineProPlugin(Star):
                     return "❌ 未选择提供商，且未配置手动模型名称", ""
 
         source_info = f"提供商:{self.provider_id}" if (self.provider_id and self.provider) else "手动配置"
-        
+
+        # ========== 合并生成参数：显式 gen_params > 模型默认参数（按最终 model_name 取） ==========
+        final_params = _merge_params(self._get_model_default_params(model_name), gen_params or {})
+
+        # ========== 模型允许分辨率限制（allowed_sizes）统一校验 ==========
+        # 说明：size 可能来自三条来源——显式 gen_params（指令 键:值 / LLM params）、指令 image_size
+        # （2K/4K 白名单后缀，仅 Gemini 生效）、模型默认参数/全局默认。此处只对「最终生效的 size」
+        # 做限制检查；size_strict=True（指令路径，用户显式指定了不支持的分辨率）→ 报错拒绝，
+        # size_strict=False（LLM 路径）→ 夹取到 allowed_sizes 中数值最大者，并通过日志记录。
+        allowed_sizes = self._get_model_allowed_sizes(model_name)
+        if allowed_sizes:
+            explicit_size = (gen_params or {}).get("size") or image_size
+            effective_size = final_params.get("size") or explicit_size
+            if effective_size and effective_size not in allowed_sizes:
+                max_avail = _max_allowed_size(allowed_sizes)
+                if size_strict and explicit_size:
+                    # 指令路径：用户显式指定了该模型不支持的分辨率 → 明确报错
+                    return (f"❌ 该模型（{model_name}）仅支持分辨率：{'/'.join(allowed_sizes)}"
+                            f"（当前指定 {effective_size}）", model_name)
+                if max_avail:
+                    final_params["size"] = max_avail
+                    logger.info(f"[NewImage] 模型 {model_name} 不支持分辨率 {effective_size}，"
+                                f"已自动调整为允许的最大分辨率 {max_avail}")
+
         # ========== 根据开关选择路由 ==========
         if self.is_gemini_api:
-            return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt, image_size, source_info), model_name
+            return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
+                                               image_size, source_info, final_params), model_name
         else:
-            return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt, source_info), model_name
+            return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt,
+                                               source_info, final_params), model_name
 
     async def _call_gemini_api(self, api_url: str, api_key: str, model_name: str,
                                 image_bytes_list: List[bytes], prompt: str,
-                                image_size: Optional[str], source_info: str) -> bytes | str:
-        """Gemini 原生 API 路径（generateContent）"""
+                                image_size: Optional[str], source_info: str,
+                                gen_params: Optional[Dict] = None) -> bytes | str:
+        """Gemini 原生 API 路径（generateContent）
+
+        gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
+            temperature → generationConfig.temperature（float）
+            max_tokens  → generationConfig.maxOutputTokens（int）
+            size        → generationConfig.imageConfig.imageSize（与指令 image_size 合并取最高优先级）
+            negative_prompt / steps / 其他透传键 → generationConfig.imageConfig 扩展字段
+        """
         
         # 构建 Gemini 格式的 endpoint
         api_url = api_url.rstrip("/")
@@ -1194,13 +1588,31 @@ class FigurineProPlugin(Star):
                 "responseModalities": ["TEXT", "IMAGE"]
             }
         }
-        
-        # 确定最终使用的 imageSize：用户指定 > 全局默认
-        final_image_size = image_size or self.default_image_size
+
+        # ========== 应用生成参数（gen_params = 模型默认 + 显式覆盖） ==========
+        # temperature → generationConfig.temperature（float）
+        if gen_params and "temperature" in gen_params:
+            request_body["generationConfig"]["temperature"] = float(gen_params["temperature"])
+        # max_tokens → generationConfig.maxOutputTokens（int）
+        if gen_params and "max_tokens" in gen_params:
+            request_body["generationConfig"]["maxOutputTokens"] = int(gen_params["max_tokens"])
+        # 确定最终使用的 imageSize：gen_params.size > 指令 image_size > 全局默认
+        final_image_size = gen_params.get("size") if (gen_params and gen_params.get("size")) else (image_size or self.default_image_size)
+        image_config: Dict[str, Any] = {}
         if final_image_size:
-            image_config: Dict[str, Any] = {"imageSize": final_image_size}
-            request_body["generationConfig"]["imageConfig"] = image_config
+            image_config["imageSize"] = final_image_size
             logger.info(f"[NewImage/Gemini] 使用分辨率: {final_image_size}")
+        # negative_prompt / steps / 其他透传键 → imageConfig 扩展字段
+        if gen_params:
+            for pk, pv in gen_params.items():
+                if pk in ("size", "temperature", "max_tokens"):
+                    continue  # 已单独映射
+                if pk == "negative_prompt":
+                    image_config["negativePrompt"] = pv
+                else:
+                    image_config[pk] = pv  # steps 及透传键原样透传
+        if image_config:
+            request_body["generationConfig"]["imageConfig"] = image_config
         
         # 添加安全过滤设置
         if self.safety_level:
@@ -1277,8 +1689,16 @@ class FigurineProPlugin(Star):
             return f"发生未知错误: {e}"
 
     async def _call_openai_api(self, api_url: str, api_key: str, model_name: str,
-                                image_bytes_list: List[bytes], prompt: str, source_info: str) -> bytes | str:
-        """OpenAI 兼容 API 路径（/v1/chat/completions）"""
+                                image_bytes_list: List[bytes], prompt: str, source_info: str,
+                                gen_params: Optional[Dict] = None) -> bytes | str:
+        """OpenAI 兼容 API 路径（/v1/chat/completions）
+
+        gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
+            temperature → payload.temperature（float）
+            max_tokens  → payload.max_tokens（int）
+            size        → payload.size（str）
+            negative_prompt / steps / 其他透传键 → payload.extra_body 扩展字段
+        """
         
         # 处理 API URL 格式
         api_url = api_url.rstrip("/")
@@ -1326,6 +1746,24 @@ class FigurineProPlugin(Star):
             "max_tokens": 1024,
             "temperature": 0.7,
         }
+
+        # ========== 应用生成参数（gen_params = 模型默认 + 显式覆盖） ==========
+        # temperature / max_tokens / size 映射到标准字段
+        if gen_params:
+            if "temperature" in gen_params:
+                payload["temperature"] = float(gen_params["temperature"])
+            if "max_tokens" in gen_params:
+                payload["max_tokens"] = int(gen_params["max_tokens"])
+            if "size" in gen_params:
+                payload["size"] = gen_params["size"]
+            # negative_prompt / steps / 其他透传键 → extra_body（中转常见支持，避免污染标准字段）
+            extra: Dict[str, Any] = {}
+            for pk, pv in gen_params.items():
+                if pk in ("size", "temperature", "max_tokens"):
+                    continue
+                extra[pk] = pv
+            if extra:
+                payload["extra_body"] = extra
 
         logger.info(f"[NewImage/OAI] 发送请求 [{source_info}]: Model={model_name}, HasImage={bool(image_bytes_list)}")
 
@@ -1390,6 +1828,363 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"调用 API 时发生未知错误: {e}", exc_info=True)
             return f"发生未知错误: {e}"
+
+    # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
+    WEB_PLUGIN_NAME = "astrbot_plugin_nova_newimage_self"
+    # POST /config 白名单字段（键名 = conf 键名）
+    _WEB_CONFIG_FIELD_TYPES = {
+        "api_url": str,
+        "is_gemini_api": bool,
+        "safety_level": str,
+        "image_size": str,
+        "enable_user_limit": bool,
+        "enable_group_limit": bool,
+        "group_task_limit": int,
+        "enable_checkin": bool,
+        "user_count_cap": int,
+        "hires_whitelist": list,
+        "user_whitelist": list,
+        "user_blacklist": list,
+    }
+
+    def _register_web_apis(self) -> None:
+        """注册插件 WebUI 后端 API（仅注册一次，重载插件时幂等）。"""
+        if self._web_registered:
+            return
+        self._web_registered = True
+        base = f"/{self.WEB_PLUGIN_NAME}"
+        endpoints = [
+            (f"{base}/models", self._web_models_get, ["GET"], "获取可用模型列表（含配额/说明）"),
+            (f"{base}/models", self._web_models_post, ["POST"], "保存可用模型列表（含配额/说明）"),
+            (f"{base}/users", self._web_users_get, ["GET"], "获取用户次数列表（分页/搜索）"),
+            (f"{base}/users/add", self._web_users_add, ["POST"], "增加用户次数（不受上限限制）"),
+            (f"{base}/groups", self._web_groups_get, ["GET"], "获取群组次数列表（分页/搜索）"),
+            (f"{base}/groups/add", self._web_groups_add, ["POST"], "增加群组次数"),
+            (f"{base}/logs", self._web_logs_get, ["GET"], "获取生图时间线（范围/天数/分页）"),
+            (f"{base}/logs/delete", self._web_logs_delete, ["POST"], "删除生图时间线记录（按时间戳或范围）"),
+            (f"{base}/config", self._web_config_get, ["GET"], "获取基础配置（API Key 掩码）"),
+            (f"{base}/config", self._web_config_post, ["POST"], "保存部分配置（白名单字段）"),
+        ]
+        for route, handler, methods, desc in endpoints:
+            self.context.register_web_api(route, handler, methods, desc)
+
+    def _web_require_login(self):
+        """校验请求来自 Dashboard 登录用户（request.username 存在）。返回 None 表示放行，否则返回错误响应。"""
+        try:
+            username = request.username
+        except Exception:
+            username = None
+        if not username:
+            return error_response("未登录，禁止访问（仅 Dashboard 登录用户可调用）", status_code=403)
+        return None
+
+    async def _web_models_get(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            models = [
+                {"name": m["name"], "quota": int(m["quota"]), "desc": str(m.get("desc", "")),
+                 "params": dict(m.get("params") or {}),
+                 "allowed_sizes": m.get("allowed_sizes")}
+                for m in self.available_models
+            ]
+            return json_response({"models": models})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_models_post(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            models = payload.get("models")
+            if not isinstance(models, list):
+                return error_response("models 必须是数组")
+            lines = []
+            for m in models:
+                if not isinstance(m, dict):
+                    return error_response("models 元素必须是对象")
+                name = str(m.get("name", "")).strip()
+                if not name:
+                    return error_response("模型名不能为空")
+                try:
+                    quota = int(m.get("quota", 1))
+                except (TypeError, ValueError):
+                    return error_response(f"模型 {name} 的配额必须为整数")
+                if quota < 1:
+                    return error_response(f"模型 {name} 的配额必须 >= 1")
+                desc = str(m.get("desc", "")).strip()
+                # 接受 params（dict），用 _sanitize_params 温和清洗（夹取/丢弃）后序列化为第 4 段 JSON
+                raw_params = m.get("params")
+                if raw_params is None:
+                    params, _ = {}, []
+                else:
+                    params, _ = self._sanitize_params(raw_params, "WebUI")
+                # 接受 allowed_sizes（List[str] 或 null；null/空数组 = 不限制，不写 sizes 键）
+                allowed_sizes = m.get("allowed_sizes")
+                if allowed_sizes is not None:
+                    if not isinstance(allowed_sizes, list) or not all(
+                            isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in allowed_sizes):
+                        return error_response(f"模型 {name} 的 allowed_sizes 只能包含 1K/2K/4K 字符串数组或 null")
+                    if allowed_sizes:
+                        params["sizes"] = list(dict.fromkeys(allowed_sizes))
+                if params:
+                    params_json = json.dumps(params, ensure_ascii=False)
+                    lines.append(f"{name};{quota};{desc};{params_json}")
+                elif desc:
+                    lines.append(f"{name};{quota};{desc}")
+                else:
+                    lines.append(f"{name};{quota}")
+            await self.conf.set("model", "\n".join(lines))
+            self._parse_available_models()
+            return json_response({"ok": True, "count": len(lines)})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_users_get(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            search = (request.query.get("search", "") or "").strip()
+            page = max(1, request.query.get("page", 1, type=int))
+            page_size = max(1, min(request.query.get("page_size", 20, type=int), 200))
+            items = [{"qq": uid, "count": cnt} for uid, cnt in self.user_counts.items()]
+            if search:
+                items = [it for it in items if search in it["qq"]]
+            items.sort(key=lambda x: x["count"], reverse=True)
+            total = len(items)
+            start = (page - 1) * page_size
+            return json_response({"users": items[start:start + page_size], "total": total})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_users_add(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            qq = str(payload.get("qq", "")).strip()
+            if not qq:
+                return error_response("qq 不能为空")
+            try:
+                amount = int(payload.get("amount", 0))
+            except (TypeError, ValueError):
+                return error_response("amount 必须为整数")
+            if amount < 1:
+                return error_response("amount 必须 >= 1")
+            current_count = self._get_user_count(qq)
+            new_count = current_count + amount
+            # 管理员豁免 cap——不受 user_count_cap 截断
+            self.user_counts[str(qq)] = new_count
+            await self._save_user_counts()
+            return json_response({"ok": True, "count": new_count})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_groups_get(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            search = (request.query.get("search", "") or "").strip()
+            page = max(1, request.query.get("page", 1, type=int))
+            page_size = max(1, min(request.query.get("page_size", 20, type=int), 200))
+            items = [{"group_id": gid, "count": cnt} for gid, cnt in self.group_counts.items()]
+            if search:
+                items = [it for it in items if search in it["group_id"]]
+            items.sort(key=lambda x: x["count"], reverse=True)
+            total = len(items)
+            start = (page - 1) * page_size
+            return json_response({"groups": items[start:start + page_size], "total": total})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_groups_add(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            group_id = str(payload.get("group_id", "")).strip()
+            if not group_id:
+                return error_response("group_id 不能为空")
+            try:
+                amount = int(payload.get("amount", 0))
+            except (TypeError, ValueError):
+                return error_response("amount 必须为整数")
+            if amount < 1:
+                return error_response("amount 必须 >= 1")
+            current_count = self._get_group_count(group_id)
+            new_count = current_count + amount
+            self.group_counts[str(group_id)] = new_count
+            await self._save_group_counts()
+            return json_response({"ok": True, "count": new_count})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_logs_get(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            scope = (request.query.get("scope", "") or "").strip() or "本群"
+            days = request.query.get("days", 0, type=int)
+            limit = max(1, min(request.query.get("limit", 20, type=int), 200))
+            page = max(1, request.query.get("page", 1, type=int))
+            records = list(reversed(self.generation_history))  # 时间倒序（最新在前）
+            if scope != "全局":
+                # 本群：WebUI 无群上下文，需显式 group_id 查询参数
+                gid = (request.query.get("group_id", "") or "").strip()
+                records = [r for r in records if str(r.get("group_id", "")) == str(gid)] if gid else []
+            if days > 0:
+                cutoff = datetime.now() - timedelta(days=days)
+                filtered = []
+                for r in records:
+                    try:
+                        if datetime.strptime(str(r.get("timestamp", "")), "%Y%m%d_%H%M%S_%f") >= cutoff:
+                            filtered.append(r)
+                    except ValueError:
+                        continue
+                records = filtered
+            total = len(records)
+            start = (page - 1) * limit
+            logs = [{
+                "timestamp": r.get("timestamp", ""),
+                "group_id": r.get("group_id", ""),
+                "user_id": r.get("user_id", ""),
+                "prompt": r.get("prompt", ""),
+                "model": r.get("model", ""),
+                "file_path": r.get("file_path", ""),
+            } for r in records[start:start + limit]]
+            return json_response({"logs": logs, "total": total})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_logs_delete(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            before = len(self.generation_history)
+            remaining = list(self.generation_history)
+            if "timestamps" in payload:
+                ts_set = set(str(t) for t in payload.get("timestamps", []) if str(t).strip())
+                if not ts_set:
+                    return error_response("timestamps 不能为空")
+                remaining = [r for r in remaining if str(r.get("timestamp", "")) not in ts_set]
+            elif "start" in payload and "end" in payload:
+                start_ts = str(payload.get("start", "")).strip()
+                end_ts = str(payload.get("end", "")).strip()
+                if not start_ts or not end_ts:
+                    return error_response("范围删除需要 start 与 end 时间戳")
+                scope_key = str(payload.get("scope", "全局") or "全局")
+                kept = []
+                for r in self.generation_history:
+                    r_ts = str(r.get("timestamp", ""))
+                    in_range = start_ts <= r_ts <= end_ts
+                    in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
+                    if not (in_range and in_scope):
+                        kept.append(r)
+                remaining = kept
+            else:
+                return error_response("需要提供 timestamps 或 scope+start+end")
+            removed = before - len(remaining)
+            if removed:
+                self.generation_history = remaining
+                await self._save_generation_history()
+            return json_response({"ok": True, "deleted": removed})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_config_get(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            api_keys = self.conf.get("api_keys", [])
+            masked = []
+            for key in api_keys:
+                key = str(key)
+                masked.append(f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***")
+            return json_response({
+                "api_url": self.conf.get("api_url", ""),
+                "model": self.conf.get("model", ""),
+                "api_keys": masked,
+                "is_gemini_api": bool(self.conf.get("is_gemini_api", False)),
+                "safety_level": self.conf.get("safety_level", ""),
+                "image_size": self.conf.get("image_size", ""),
+                "enable_user_limit": bool(self.conf.get("enable_user_limit", True)),
+                "enable_group_limit": bool(self.conf.get("enable_group_limit", False)),
+                "group_task_limit": self.conf.get("group_task_limit", 2),
+                "enable_checkin": bool(self.conf.get("enable_checkin", False)),
+                "user_count_cap": self.conf.get("user_count_cap", 0),
+                "hires_whitelist": self.conf.get("hires_whitelist", []),
+                "user_whitelist": self.conf.get("user_whitelist", []),
+                "blacklist": self.conf.get("user_blacklist", []),
+            })
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_config_post(self):
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            # blacklist 别名 → conf 键 user_blacklist
+            if "blacklist" in payload and "user_blacklist" not in payload:
+                payload["user_blacklist"] = payload.pop("blacklist")
+            saved = []
+            for key, expected in self._WEB_CONFIG_FIELD_TYPES.items():
+                if key not in payload:
+                    continue
+                value = payload[key]
+                if expected is bool:
+                    if not isinstance(value, bool):
+                        return error_response(f"字段 {key} 必须为布尔值")
+                elif expected is int:
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        return error_response(f"字段 {key} 必须为整数")
+                    if key in ("group_task_limit", "user_count_cap") and value < 0:
+                        return error_response(f"字段 {key} 必须 >= 0")
+                elif expected is list:
+                    if not isinstance(value, list):
+                        return error_response(f"字段 {key} 必须为数组")
+                    value = [str(v) for v in value]
+                elif expected is str:
+                    if not isinstance(value, str):
+                        return error_response(f"字段 {key} 必须为字符串")
+                await self.conf.set(key, value)
+                saved.append(key)
+            # 重载受影响的运行时状态
+            if "user_count_cap" in saved:
+                try:
+                    self.user_count_cap = max(0, int(self.conf.get("user_count_cap", 0)))
+                except (TypeError, ValueError):
+                    self.user_count_cap = 0
+            if "group_task_limit" in saved:
+                try:
+                    self.group_task_limit = max(0, int(self.conf.get("group_task_limit", 2)))
+                except (TypeError, ValueError):
+                    self.group_task_limit = 0
+            if "is_gemini_api" in saved:
+                self.is_gemini_api = bool(self.conf.get("is_gemini_api", False))
+            if "safety_level" in saved:
+                self.safety_level = (self.conf.get("safety_level", "") or "").strip()
+            if "image_size" in saved:
+                self.default_image_size = (self.conf.get("image_size", "") or "").strip().upper()
+            if "hires_whitelist" in saved:
+                self.hires_whitelist = [str(x) for x in self.conf.get("hires_whitelist", [])]
+            return json_response({"ok": True, "saved": saved})
+        except Exception as e:
+            return error_response(str(e))
 
     async def terminate(self):
         if self.iwf: await self.iwf.terminate()

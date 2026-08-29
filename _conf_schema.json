@@ -13,9 +13,9 @@
         "default": ""
     },
     "model": {
-        "description": "【手动配置】生图模型名称",
-        "type": "string",
-        "hint": "可填写多个模型，每行一个，用 `>>切换模型` 指令在群内切换（仅管理员）",
+        "description": "【手动配置】生图模型名称（可配置多模型、每次消耗配额、默认生成参数与允许分辨率）",
+        "type": "text",
+        "hint": "每行一个模型，格式：`模型名;每次消耗配额;给LLM的该模型说明;{参数JSON}`，如 `gpt-image-2;1;标准生图，速度快;{\"size\":\"2K\",\"temperature\":0.9}`。分号分隔，配额缺省为 1，说明缺省为空，参数 JSON 可缺省（可用键：size/temperature/max_tokens/steps/negative_prompt）。参数 JSON 还可含 `\"sizes\"` 键限制该模型可用分辨率，如 `gpt-image;1;标准;{\"sizes\":[\"1K\"]}`，只支持 1K/2K/4K 之一或组合。",
         "default": "google/gemini-2.0-flash-exp:free"
     },
     "api_keys": {
