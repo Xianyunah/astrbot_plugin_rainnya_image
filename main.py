@@ -127,7 +127,7 @@ def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
 
 
 @register(
-    "astrbot_plugin_newimage",
+    "astrbot_plugin_nova_newimage",
     "辉宝",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
     "1.4.1",
@@ -1830,7 +1830,7 @@ class FigurineProPlugin(Star):
             return f"发生未知错误: {e}"
 
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
-    WEB_PLUGIN_NAME = "astrbot_plugin_nova_newimage_self"
+    WEB_PLUGIN_NAME = "astrbot_plugin_nova_newimage"
     # POST /config 白名单字段（键名 = conf 键名）
     _WEB_CONFIG_FIELD_TYPES = {
         "api_url": str,
