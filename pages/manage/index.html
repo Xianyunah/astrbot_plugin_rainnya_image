@@ -344,6 +344,8 @@
   <!-- ======== Toast 容器 ======== -->
   <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
+  <!-- 显式先加载 bridge SDK，保证 app.js 同步取到 window.AstrBotPluginPage（AstrBot 见已有此标签则不再重复注入） -->
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

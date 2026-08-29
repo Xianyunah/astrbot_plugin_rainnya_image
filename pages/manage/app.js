@@ -652,6 +652,11 @@
    * ============================================================ */
   async function init() {
     bindEvents();
+    // 兜底：若 bridge 尚未注入（显式引入 bridge-sdk 后正常应已就绪），短时轮询等待
+    for (var i = 0; i < 50 && !(bridge && bridge.ready); i++) {
+      bridge = window.AstrBotPluginPage;
+      await new Promise(function (r) { setTimeout(r, 100); });
+    }
     if (bridge && bridge.ready) {
       try {
         ctx = await bridge.ready();
