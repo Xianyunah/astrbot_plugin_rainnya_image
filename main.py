@@ -1861,6 +1861,7 @@ class FigurineProPlugin(Star):
             (f"{base}/groups", self._web_groups_get, ["GET"], "获取群组次数列表（分页/搜索）"),
             (f"{base}/groups/add", self._web_groups_add, ["POST"], "增加群组次数"),
             (f"{base}/logs", self._web_logs_get, ["GET"], "获取生图时间线（范围/天数/分页）"),
+            (f"{base}/logs/image", self._web_logs_image, ["GET"], "获取生图图片（路径校验 + base64）"),
             (f"{base}/logs/delete", self._web_logs_delete, ["POST"], "删除生图时间线记录（按时间戳或范围）"),
             (f"{base}/config", self._web_config_get, ["GET"], "获取基础配置（API Key 掩码）"),
             (f"{base}/config", self._web_config_post, ["POST"], "保存部分配置（白名单字段）"),
@@ -2099,6 +2100,47 @@ class FigurineProPlugin(Star):
                 await self._save_generation_history()
             return json_response({"ok": True, "deleted": removed})
         except Exception as e:
+            return error_response(str(e))
+
+    async def _web_logs_image(self):
+        """返回生图记录对应的图片（base64 data URL）。
+
+        参数 path: 日志里的 file_path（服务器绝对路径）。
+        安全校验：resolve() 后必须位于 StarTools.get_data_dir()/generations 目录之内，防路径穿越。
+        说明：父页面 bridge api:get 走 axios 默认 JSON 解析，二进制 file_response 无法直接透传，
+        故改为返回 JSON {"image": "data:<type>;base64,..."}，前端以 <img src=dataURL> 展示。
+        """
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            raw_path = (request.query.get("path", "") or "").strip()
+            if not raw_path:
+                return error_response("缺少 path 参数", 400)
+            gen_root = (self.plugin_data_dir / "generations").resolve()
+            try:
+                resolved = Path(raw_path).resolve()
+            except Exception:
+                return error_response("非法路径", 400)
+            # 防路径穿越：必须在 generations 目录之内
+            if not resolved.is_relative_to(gen_root):
+                return error_response("非法路径", 400)
+            if not resolved.is_file():
+                return error_response("文件不存在", 404)
+            # 扩展名 → content_type
+            ext = resolved.suffix.lower()
+            content_type = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+            }.get(ext, "image/png")
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, resolved.read_bytes)
+            b64 = base64.b64encode(data).decode("ascii")
+            return json_response({"image": f"data:{content_type};base64,{b64}"})
+        except Exception as e:
+            logger.error(f"[NewImage] 读取生图图片失败: {e}", exc_info=True)
             return error_response(str(e))
 
     async def _web_config_get(self):

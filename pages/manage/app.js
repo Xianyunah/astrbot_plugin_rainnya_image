@@ -330,9 +330,10 @@
       return;
     }
     wrap.innerHTML = logItems.map(function (r) {
+      // 缩略图：data-path 存文件路径，交给懒加载器（滚动到可见才请求图片，避免一次请求全部）
       return (
         '<article class="log-card" data-ts="' + esc(r.timestamp) + '">' +
-        '<div class="thumb" aria-hidden="true">' +
+        '<div class="thumb" data-path="' + esc(r.file_path || "") + '">' +
         '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>' +
         '<span class="thumb-time">' + esc(shortTs(r.timestamp)) + "</span>" +
         "</div>" +
@@ -351,10 +352,48 @@
         "</article>"
       );
     }).join("");
+    scheduleThumbLoad();
     var more = logItems.length < logTotal;
     el("logsMore").disabled = !more;
     el("logsMore").textContent = more ? "加载更多" : "已加载全部";
     el("logsMeta").textContent = "共 " + logTotal + " 条 · 已加载 " + logItems.length;
+  }
+
+  /* 缩略图懒加载：用 IntersectionObserver，滚动到可见才取图；
+     无 IntersectionObserver 时降级为只加载前 5 条。 */
+  var thumbObserver = null;
+  function scheduleThumbLoad() {
+    var thumbs = Array.prototype.slice.call(el("logsBody").querySelectorAll(".thumb[data-path]"));
+    if (!thumbs.length) return;
+    if (!("IntersectionObserver" in window)) {
+      thumbs.slice(0, 5).forEach(loadThumb);
+      return;
+    }
+    if (!thumbObserver) {
+      thumbObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            thumbObserver.unobserve(entry.target);
+            loadThumb(entry.target);
+          }
+        });
+      }, { rootMargin: "120px" });
+    }
+    thumbs.forEach(function (t) { thumbObserver.observe(t); });
+  }
+
+  function loadThumb(thumbEl) {
+    var path = thumbEl.getAttribute("data-path");
+    thumbEl.removeAttribute("data-path");
+    if (!path) return; // 无路径保持占位
+    apiGet("logs/image", { path: path }).then(function (res) {
+      if (res && res.image) {
+        thumbEl.innerHTML = '<img class="thumb-img" src="' + res.image + '" alt="生图缩略图">';
+      }
+      // 失败/无图保持占位，不崩
+    }).catch(function () {
+      /* 保持占位 */
+    });
   }
 
   function viewLogDetail(ts) {
@@ -374,6 +413,26 @@
     el("viewDetail").innerHTML = rows.map(function (kv) {
       return '<div class="dl-item"><span class="dl-k">' + esc(kv[0]) + '</span><span class="dl-v">' + esc(kv[1]) + "</span></div>";
     }).join("");
+    // 加载真实图片（backend logs/image 返回 base64 data URL）
+    var imgWrap = el("viewImageWrap"), img = el("viewImage"), ph = el("viewPlaceholder");
+    imgWrap.hidden = true;
+    ph.hidden = false;
+    ph.textContent = "🖼 正在加载图片…";
+    if (!r.file_path) {
+      ph.textContent = "🖼 该记录无图片文件";
+    } else {
+      apiGet("logs/image", { path: r.file_path }).then(function (res) {
+        if (res && res.image) {
+          img.src = res.image;
+          imgWrap.hidden = false;
+          ph.hidden = true;
+        } else {
+          ph.textContent = "🖼 图片加载失败或文件不存在";
+        }
+      }).catch(function (e) {
+        ph.textContent = "🖼 图片加载失败：" + e.message;
+      });
+    }
     openModal("viewModal");
   }
 

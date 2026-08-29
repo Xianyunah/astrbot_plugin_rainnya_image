@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>辉宝生图 · 管理台</title>
+  <title>喵喵生图 · 管理台</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
@@ -17,7 +17,7 @@
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
         </span>
-        <span class="brand-name">辉宝生图</span>
+        <span class="brand-name">喵喵生图</span>
         <span class="brand-sub">NewImage 管理台</span>
       </div>
 
@@ -51,7 +51,7 @@
       <!-- ======== 顶栏 ======== -->
       <header class="appbar">
         <div class="appbar-inner">
-          <span class="appbar-brand">辉宝生图 <i>·</i> NewImage</span>
+          <span class="appbar-brand">喵喵生图 <i>·</i> NewImage</span>
           <h2 class="page-title" id="pageTitle">模型管理</h2>
           <span class="appbar-spacer"></span>
           <button type="button" class="btn btn-ghost btn-sm" id="btnRefresh" title="刷新当前页">
@@ -149,7 +149,7 @@
             <div class="card-head">
               <div>
                 <h3 class="card-title">生图时间线</h3>
-                <p class="card-desc">按范围与时间筛选生图记录，卡片式浏览。缩略图为占位（页面无法直接读取服务器图片）。</p>
+                <p class="card-desc">按范围与时间筛选生图记录，卡片式浏览。缩略图懒加载，点击「查看大图」展示原图。</p>
               </div>
               <div class="card-actions">
                 <label class="select-box">
@@ -319,7 +319,7 @@
     </div>
   </div>
 
-  <!-- ======== 查看大图弹层（占位：无图片 API） ======== -->
+  <!-- ======== 查看大图弹层 ======== -->
   <div class="modal-mask" id="viewModal" hidden>
     <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="viewTitle">
       <div class="modal-head">
@@ -329,7 +329,10 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="view-placeholder" id="viewPlaceholder">🖼 页面无法直接读取服务器图片，以下为记录信息</div>
+        <div class="view-image-wrap" id="viewImageWrap" hidden>
+          <img id="viewImage" alt="生图预览">
+        </div>
+        <div class="view-placeholder" id="viewPlaceholder" hidden>🖼 正在加载图片…</div>
         <dl class="detail-list" id="viewDetail"></dl>
       </div>
       <div class="modal-foot">
