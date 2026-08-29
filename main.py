@@ -13,7 +13,7 @@ from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Plain
+from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.provider import Provider
 
@@ -1264,11 +1264,36 @@ class FigurineProPlugin(Star):
         # 记录当前日志消息 id 供后续翻页撤回（event.send 返回 None 时即不可撤回）
         self._log_page_msgid[key] = {"msgid": sent_id, "page": page, "scope": scope, "count": count}
 
+    async def _extract_event_images(self, event: AstrMessageEvent) -> List[bytes]:
+        """从用户当前消息中提取图片字节（引用回复链内的图 + 直接 Image 组件）。
+
+        LLM 工具（generate_image）用：拿到用户附带的参考图做图+文生图；无图返回空列表（纯文生图）。
+        注意：不走 self.iwf.get_images 的头像兜底逻辑（LLM 场景不该自动用头像当参考图）。
+        """
+        if not self.iwf or not event.message_obj or not getattr(event.message_obj, "message", None):
+            return []
+        img_bytes_list: List[bytes] = []
+        try:
+            for seg in event.message_obj.message:
+                if isinstance(seg, Reply) and getattr(seg, "chain", None):
+                    for s_chain in seg.chain:
+                        if isinstance(s_chain, Image):
+                            if img := await self.iwf._image_component_to_bytes(s_chain):
+                                img_bytes_list.append(img)
+                elif isinstance(seg, Image):
+                    if img := await self.iwf._image_component_to_bytes(seg):
+                        img_bytes_list.append(img)
+        except Exception as e:
+            logger.warning(f"[NewImage] 提取当前消息图片失败: {e}", exc_info=True)
+        return img_bytes_list
+
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
         async def generate_image(self, event: AstrMessageEvent, prompt: str, model: str = "",
                                  params: Optional[Dict] = None):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
+
+            注意：若用户在当前消息（或引用/刚发送的消息）中附带图片，本工具会自动提取该图片作为参考进行「图+文生图」；若纯文本描述则进行「文生图」。
 
             Args:
                 prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
@@ -1280,6 +1305,8 @@ class FigurineProPlugin(Star):
             # 注意：llm_tool 工具是纯协程（函数体内不能有 yield），发消息给用户用 event.send，return 文本回传 LLM
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
+            # 尝试从用户当前消息中提取图片（引用回复链/直接 Image 组件），无图则纯文生图
+            image_bytes_list = await self._extract_event_images(event)
             # 确定最终模型：用户指定 > 本群配置模型 > 手动配置默认模型 > conf.model 兜底
             final_model = (model or "").strip()
             if not final_model:
@@ -1302,19 +1329,22 @@ class FigurineProPlugin(Star):
             # 对 LLM 传入的 params 做温和清洗（夹取/丢弃），再传入后台任务
             cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
             task = asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
-                                                            params=cleaned_params))
+                                                            params=cleaned_params,
+                                                            image_bytes_list=image_bytes_list))
             # 保存后台任务引用（防 GC），结束后自动从集合移除；terminate 时统一回收
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
             return "已开始生成图片，生成完成后会自动发送到当前会话，请稍候。"
 
         async def _async_generate(self, event: AstrMessageEvent, prompt: str, model: str = "", quota: int = 1,
-                                  params: Optional[Dict] = None) -> None:
+                                  params: Optional[Dict] = None,
+                                  image_bytes_list: Optional[List[bytes]] = None) -> None:
             """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。
 
             model: 指定生图模型（可空，空则 _call_api 内部走默认选择逻辑）；
             quota: 本次生成消耗的次数（与 _check_usage_quota / _consume_quota 的 quota 语义一致）；
-            params: 生成参数（已在 generate_image 清洗），在 _call_api 内与模型默认参数合并。
+            params: 生成参数（已在 generate_image 清洗），在 _call_api 内与模型默认参数合并；
+            image_bytes_list: 用户当前消息中提取的参考图片（图+文生图用），None/空列表则纯文生图。
             """
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
@@ -1336,7 +1366,7 @@ class FigurineProPlugin(Star):
                         except Exception as e:
                             logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                         return
-                res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id,
+                res, used_model = await self._call_api(image_bytes_list or [], prompt, image_size=None, group_id=group_id,
                                                        model_override=model or None, gen_params=params or None)
                 if isinstance(res, bytes):
                     # 记录实际扣减来源（群/个人），剩余次数展示与扣减来源一致
@@ -1453,6 +1483,102 @@ class FigurineProPlugin(Star):
                 lines.append(f"{r.get('timestamp','?')} | {r.get('group_id','') or 'private'} | {prompt_short} | "
                              f"{r.get('file_path','?')}")
             return "生图记录如下：\n" + "\n".join(lines)
+
+        @filter.llm_tool(name="query_generation_image")
+        async def query_generation_image(self, event: AstrMessageEvent, file_path: str = ""):
+            """查询生图历史记录对应的原图，并将图片直接发送给用户。用户问「之前生成的那张图」「历史图片」等时可调用。本工具不执行生图，仅查询并发送图片。
+
+            Args:
+                file_path(string): 生图记录中的图片文件路径（来自 query_generation_history 返回的 file_path 字段）
+            """
+            # 校验 file_path 在 generations 目录内（防路径穿越），读取并转 base64 data URL 发送
+            resolved, _, err_reason = self._resolve_generation_file(file_path)
+            if not resolved:
+                try:
+                    await event.send(MessageChain(chain=[Plain(f"未找到该历史图片：{err_reason}")]))
+                except Exception as e:
+                    logger.error(f"[NewImage] 发送历史图片失败提示出错: {e}", exc_info=True)
+                return f"未找到历史图片：{err_reason}"
+            loop = asyncio.get_running_loop()
+            try:
+                data = await loop.run_in_executor(None, resolved.read_bytes)
+            except Exception as e:
+                logger.error(f"[NewImage] 读取历史图片失败: {e}", exc_info=True)
+                try:
+                    await event.send(MessageChain(chain=[Plain("读取历史图片失败，请稍后重试。")]))
+                except Exception as e2:
+                    logger.error(f"[NewImage] 发送读取失败提示出错: {e2}", exc_info=True)
+                return "读取历史图片失败，请稍后重试。"
+            try:
+                await event.send(MessageChain(chain=[Image.fromBytes(data), Plain("历史图片")]))
+            except Exception as e:
+                logger.error(f"[NewImage] 发送历史图片失败: {e}", exc_info=True)
+                return "发送历史图片失败，请稍后重试。"
+            return "已将历史图片发送给用户。"
+
+        @filter.llm_tool(name="query_generation_stats")
+        async def query_generation_stats(self, event: AstrMessageEvent, scope: str = "本群", days: int = 7):
+            """统计生图使用情况：总张数、按模型分组、按用户分组（Top）。用户问「最近生成了多少图」「使用统计」等时可调用。本工具不执行生图，仅统计。
+
+            Args:
+                scope(string): 统计范围，本群 或 全局，默认本群
+                days(number): 最近多少天，默认 7
+            """
+            scope_val = (scope or "").strip() or "本群"
+            try:
+                days = max(1, int(days))
+            except (TypeError, ValueError):
+                days = 7
+            records = list(self.generation_history)
+            # 范围过滤：本群按当前会话群匹配；全局全部（本群且无群上下文时退化为全局）
+            if scope_val != "全局":
+                group_id = event.get_group_id()
+                if group_id:
+                    records = [r for r in records if str(r.get("group_id", "")) == str(group_id)]
+            # days 过滤：按时间戳 %Y%m%d_%H%M%S_%f 解析比较
+            cutoff = datetime.now() - timedelta(days=days)
+            filtered = []
+            for r in records:
+                try:
+                    if datetime.strptime(str(r.get("timestamp", "")), "%Y%m%d_%H%M%S_%f") >= cutoff:
+                        filtered.append(r)
+                except ValueError:
+                    continue
+            if not filtered:
+                return "暂无生图记录"
+            total = len(filtered)
+            by_model: Dict[str, int] = {}
+            by_user: Dict[str, int] = {}
+            for r in filtered:
+                model = str(r.get("model", "") or "未知")
+                by_model[model] = by_model.get(model, 0) + 1
+                user = str(r.get("user_id", "") or "未知")
+                by_user[user] = by_user.get(user, 0) + 1
+            # 按数量降序
+            model_parts = [f"{m} {c}张" for m, c in sorted(by_model.items(), key=lambda x: -x[1])]
+            user_parts = [f"{u} {c}张" for u, c in sorted(by_user.items(), key=lambda x: -x[1])[:5]]
+            scope_txt = "全局" if scope_val == "全局" else "本群"
+            return (f"近 {days} 天（{scope_txt}）共生成 {total} 张图片。\n"
+                    f"按模型：{'，'.join(model_parts)}\n"
+                    f"按用户（Top5）：{'，'.join(user_parts)}")
+
+        @filter.llm_tool(name="query_presets")
+        async def query_presets(self, event: AstrMessageEvent, preset_name: str = ""):
+            """查询生图预设（风格指令）列表或指定预设的提示词内容。用户问「有哪些预设/风格指令」「某个预设的提示词」时可调用。本工具不执行生图，仅查询。
+
+            Args:
+                preset_name(string): 预设触发词（如 手办化），留空则列出全部预设触发词
+            """
+            if not self.prompt_map:
+                return "当前未配置任何生图预设。"
+            keyword = (preset_name or "").strip()
+            if keyword:
+                prompt = self.prompt_map.get(keyword)
+                if not prompt:
+                    return f"未找到预设 [{keyword}]。可用预设：{'、'.join(list(self.prompt_map.keys()))}"
+                return f"预设 [{keyword}] 的提示词内容：\n{prompt}"
+            presets = list(self.prompt_map.keys())
+            return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
 
     async def _get_api_key(self) -> str | None:
         keys = self.conf.get("api_keys", [])
@@ -2234,6 +2360,40 @@ class FigurineProPlugin(Star):
         except Exception as e:
             return error_response(str(e))
 
+    def _resolve_generation_file(self, raw_path: str):
+        """校验并解析生图文件路径（供 _web_logs_image / query_generation_image 复用）。
+
+        返回 (path, content_type, err_reason)：
+            - 成功：path 为 resolved Path、content_type 为 MIME、err_reason 为 None
+            - 失败：path 为 None、err_reason 为原因字符串（缺参/非法路径/不存在/过大）
+        """
+        if not raw_path or not raw_path.strip():
+            return None, None, "缺少 path 参数"
+        gen_root = (self.plugin_data_dir / "generations").resolve()
+        try:
+            resolved = Path(raw_path).resolve()
+        except Exception:
+            return None, None, "非法路径"
+        # 防路径穿越：必须在 generations 目录之内
+        if not resolved.is_relative_to(gen_root):
+            return None, None, "非法路径"
+        if not resolved.is_file():
+            return None, None, "文件不存在"
+        try:
+            if resolved.stat().st_size > LOG_IMAGE_MAX_BYTES:
+                return None, None, "图片过大（超过 20MB）"
+        except OSError:
+            return None, None, "文件读取失败"
+        ext = resolved.suffix.lower()
+        content_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(ext, "image/png")
+        return resolved, content_type, None
+
     async def _web_logs_image(self):
         """返回生图记录对应的图片（base64 data URL）。
 
@@ -2246,34 +2406,15 @@ class FigurineProPlugin(Star):
             return resp
         try:
             raw_path = (request.query.get("path", "") or "").strip()
-            if not raw_path:
-                return error_response("缺少 path 参数", 400)
-            gen_root = (self.plugin_data_dir / "generations").resolve()
-            try:
-                resolved = Path(raw_path).resolve()
-            except Exception:
-                return error_response("非法路径", 400)
-            # 防路径穿越：必须在 generations 目录之内
-            if not resolved.is_relative_to(gen_root):
-                return error_response("非法路径", 400)
-            if not resolved.is_file():
-                return error_response("文件不存在", 404)
-            # 大文件限制：超过阈值（20MB）拒绝，避免超大图片撑爆 base64/内存
-            try:
-                file_size = resolved.stat().st_size
-            except OSError:
-                return error_response("文件读取失败", 404)
-            if file_size > LOG_IMAGE_MAX_BYTES:
-                return error_response("图片过大（超过 20MB）", 413)
-            # 扩展名 → content_type
-            ext = resolved.suffix.lower()
-            content_type = {
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".webp": "image/webp",
-                ".gif": "image/gif",
-            }.get(ext, "image/png")
+            resolved, content_type, err_reason = self._resolve_generation_file(raw_path)
+            if not resolved:
+                if err_reason == "文件不存在" or err_reason == "文件读取失败":
+                    status = 404
+                elif err_reason and "过大" in err_reason:
+                    status = 413
+                else:
+                    status = 400
+                return error_response(err_reason, status)
             loop = asyncio.get_running_loop()
             data = await loop.run_in_executor(None, resolved.read_bytes)
             b64 = base64.b64encode(data).decode("ascii")
