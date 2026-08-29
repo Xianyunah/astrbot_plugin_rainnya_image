@@ -1272,7 +1272,7 @@ class FigurineProPlugin(Star):
 
             Args:
                 prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
-                model(string): 生图模型名（可留空，留空则用当前群默认模型；可用模型见配置面板 model 项说明）
+                model(string): 生图模型名（可留空，留空则用当前会话所在群的默认模型；若不确定可用模型请先调用 query_generation_models 工具查询）
                 params(object): 生图参数（可选，JSON对象，如 {"size":"4K","temperature":0.9}；可用键：size/temperature/max_tokens/steps/negative_prompt）
             """
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
@@ -1386,6 +1386,24 @@ class FigurineProPlugin(Star):
             group_limit_on = self.conf.get("enable_group_limit", False)
             return (f"用户 {target} 生图次数：个人剩余 {personal_display} 次（用户限制{'开' if user_limit_on else '关'}），"
                     f"当前群剩余 {group_remaining} 次（群限制{'开' if group_limit_on else '关'}）。")
+
+        @filter.llm_tool(name="query_generation_models")
+        async def query_generation_models(self, event: AstrMessageEvent):
+            """查询当前可用的生图模型列表（含每次消耗配额、说明、允许分辨率）。在不确定应使用哪个生图模型、或用户询问有哪些生图模型时可调用。本工具不执行生图，仅查询。
+
+            Args:
+            """
+            group_id = event.get_group_id()
+            current = self.group_models.get(group_id, "") if group_id else ""
+            if not self.available_models:
+                return "当前未配置任何生图模型。"
+            lines = []
+            for idx, m in enumerate(self.available_models, 1):
+                sizes = "/".join(m.get("allowed_sizes") or ["1K", "2K", "4K"])
+                desc = m.get("desc") or "（无说明）"
+                mark = "（当前群默认）" if m.get("name") == current else ""
+                lines.append(f"{idx}. {m['name']} 消耗{m.get('quota', 1)}次/张 · 允许{sizes} · {desc}{mark}")
+            return "可用生图模型：\n" + "\n".join(lines)
 
         @filter.llm_tool(name="query_generation_history")
         async def query_generation_history(self, event: AstrMessageEvent, scope: str = "本群", days: int = 0,
