@@ -192,6 +192,7 @@
   var countSearch = "";
   var PAGE_SIZE = 10;
   var rechargeTarget = null; // {kind, id, label}
+  var setTarget = null;      // {kind, id, label}
 
   async function loadCounts(reset) {
     if (reset) countPage = 1;
@@ -222,7 +223,8 @@
           "<tr>" +
           '<td><b>' + esc(id) + "</b></td>" +
           '<td class="num"><span class="badge neutral">' + esc(it.count) + " 次</span></td>" +
-          '<td><button type="button" class="btn btn-ghost btn-sm" data-act="recharge" data-id="' + esc(id) + '">充值</button></td>' +
+          '<td><button type="button" class="btn btn-ghost btn-sm" data-act="recharge" data-id="' + esc(id) + '">充值</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-act="set" data-id="' + esc(id) + '" data-count="' + esc(it.count) + '">设置</button></td>' +
           "</tr>"
         );
       }).join("");
@@ -235,16 +237,66 @@
   }
 
   function openRecharge(id, label) {
+    setTarget = null;
     rechargeTarget = { kind: countKind, id: id, label: label };
-    el("rechargeDesc").textContent = "目标：" + (countKind === "users" ? "用户 " : "群 ") + label;
+    el("rechargeTitle").textContent = "充值次数";
+    el("rechargeDesc").textContent = "目标：" + (countKind === "users" ? "用户 " : "群 ") + label + " · 充值为追加数量";
     el("rechargeAmount").value = "";
+    el("rechargeAmount").setAttribute("min", "1");
+    el("rechargeAmount").setAttribute("placeholder", "例如 50");
     el("rechargeAmount").classList.remove("invalid");
+    el("rechargeChips").hidden = false;
     el("rechargeChips").querySelectorAll(".chip").forEach(function (c) { c.classList.remove("is-selected"); });
     openModal("rechargeModal");
     setTimeout(function () { el("rechargeAmount").focus(); }, 30);
   }
 
+  function openSet(id, label, currentCount) {
+    rechargeTarget = null;
+    setTarget = { kind: countKind, id: id, label: label };
+    el("rechargeTitle").textContent = "设置次数";
+    el("rechargeDesc").textContent = "目标：" + (countKind === "users" ? "用户 " : "群 ") + label +
+      " · 当前 " + (currentCount == null ? "?" : currentCount) + " 次，设置为指定值（0 = 清零）";
+    el("rechargeAmount").value = "";
+    el("rechargeAmount").setAttribute("min", "0");
+    el("rechargeAmount").setAttribute("placeholder", "目标次数（非负整数）");
+    el("rechargeAmount").classList.remove("invalid");
+    el("rechargeChips").hidden = true;
+    openModal("rechargeModal");
+    setTimeout(function () { el("rechargeAmount").focus(); }, 30);
+  }
+
   async function confirmRecharge() {
+    if (setTarget) {
+      // 设置模式：直接设置具体次数
+      var scount = parseInt(el("rechargeAmount").value, 10);
+      if (isNaN(scount) || scount < 0) {
+        el("rechargeAmount").classList.add("invalid");
+        toast("请输入非负整数", "error");
+        return;
+      }
+      el("rechargeAmount").classList.remove("invalid");
+      var sbtn = el("rechargeConfirm");
+      sbtn.disabled = true;
+      try {
+        var sbody = { count: scount };
+        if (setTarget.kind === "users") {
+          sbody.qq = setTarget.id;
+          await apiPost("users/set", sbody);
+        } else {
+          sbody.group_id = setTarget.id;
+          await apiPost("groups/set", sbody);
+        }
+        toast((setTarget.kind === "users" ? "用户 " : "群 ") + setTarget.label + " 次数已设置为 " + scount, "success");
+        closeModal("rechargeModal");
+        loadCounts(true);
+      } catch (e) {
+        toast("设置失败：" + e.message, "error");
+      } finally {
+        sbtn.disabled = false;
+      }
+      return;
+    }
     if (!rechargeTarget) return;
     var amount = parseInt(el("rechargeAmount").value, 10);
     if (isNaN(amount) || amount === 0) {
@@ -255,7 +307,7 @@
     // 后端 users/add / groups/add 的 amount 要求 >= 1，仅支持充值，不支持负数扣减
     if (amount < 0) {
       el("rechargeAmount").classList.add("invalid");
-      toast("当前充值接口仅支持正整数（扣减需另设配额）", "error");
+      toast("当前充值接口仅支持正整数（扣减请用「设置」设为目标值）", "error");
       return;
     }
     el("rechargeAmount").classList.remove("invalid");
@@ -360,13 +412,13 @@
   }
 
   /* 缩略图懒加载：用 IntersectionObserver，滚动到可见才取图；
-     无 IntersectionObserver 时降级为只加载前 5 条。 */
+     无 IntersectionObserver 时降级为对新渲染的缩略图全部直接加载（避免「加载更多」后新图不加载）。 */
   var thumbObserver = null;
   function scheduleThumbLoad() {
     var thumbs = Array.prototype.slice.call(el("logsBody").querySelectorAll(".thumb[data-path]"));
     if (!thumbs.length) return;
     if (!("IntersectionObserver" in window)) {
-      thumbs.slice(0, 5).forEach(loadThumb);
+      thumbs.forEach(loadThumb);
       return;
     }
     if (!thumbObserver) {
@@ -388,7 +440,13 @@
     if (!path) return; // 无路径保持占位
     apiGet("logs/image", { path: path }).then(function (res) {
       if (res && res.image) {
-        thumbEl.innerHTML = '<img class="thumb-img" src="' + res.image + '" alt="生图缩略图">';
+        // 用 createElement 而非 innerHTML 拼接，避免把 data URL 直接插入 HTML 字符串
+        thumbEl.innerHTML = "";
+        var img = document.createElement("img");
+        img.className = "thumb-img";
+        img.alt = "生图缩略图";
+        img.src = res.image;
+        thumbEl.appendChild(img);
       }
       // 失败/无图保持占位，不崩
     }).catch(function () {
@@ -589,6 +647,12 @@
       loadCounts(true);
     }, 300));
     el("countsBody").addEventListener("click", function (e) {
+      var setBtn = e.target.closest("[data-act='set']");
+      if (setBtn) {
+        openSet(setBtn.getAttribute("data-id"), setBtn.getAttribute("data-id"),
+                parseInt(setBtn.getAttribute("data-count"), 10));
+        return;
+      }
       var btn = e.target.closest("[data-act='recharge']");
       if (!btn) return;
       openRecharge(btn.getAttribute("data-id"), btn.getAttribute("data-id"));
@@ -671,6 +735,13 @@
       } catch (e) {
         toast("Bridge 初始化失败：" + e.message, "error");
       }
+    } else {
+      // bridge 未注入/未就绪：给出明确提示（需在 Dashboard 登录后打开本页）
+      toast("请在 Dashboard 登录后打开本页", "error");
+      switchPage("models");
+      el("modelsBody").innerHTML =
+        '<tr class="row-empty"><td colspan="6"><div class="empty"><span class="empty-main">Bridge 未就绪，请在 Dashboard 登录后打开本页</span></div></td></tr>';
+      return;
     }
     switchPage("models");
     loadModels();

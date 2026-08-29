@@ -31,11 +31,6 @@ PARAM_SCHEMA = {
     "steps":            {"type": "int",   "min": 1,   "max": 150},
     "negative_prompt":  {"type": "str",   "max_len": 500},
 }
-# 预留：模型配置中以 params.xxx 透传的自定义键（当前为空）
-PASSTHROUGH_PARAM_KEYS = set()
-
-# 指令文本中提取 `键:值` 参数的正则（键为已知参数名才提取；引号包裹的值允许空格/冒号）
-_PARAM_EXTRACT_RE = re.compile(r'(?<![\w])([a-z_]+):("(?:[^"\\]|\\.)*"|[^\s:]+)')
 
 # 各参数校验失败时的错误文案模板
 _PARAM_ERROR_MSGS = {
@@ -45,6 +40,38 @@ _PARAM_ERROR_MSGS = {
     "steps": "参数 steps 超出范围（1-150）",
     "negative_prompt": "参数 negative_prompt 超出长度（≤500）",
 }
+
+# 分辨率数值排序（用于 allowed_sizes 夹取到最大可用 / choices 夹取）
+_SIZE_RANK = {"1K": 1, "2K": 2, "4K": 3}
+_ALLOWED_SIZE_VALUES = tuple(_SIZE_RANK.keys())
+
+# ========== 通用阈值 / 上限常量（替代魔法数字） ==========
+GENERATION_HISTORY_MAX = 500      # 生图时间线历史上限（超出删除最旧）
+MAX_IMAGES_PER_REQUEST = 5        # bnn 一次最多处理的图片数
+WEB_PAGE_SIZE_MAX = 200           # Web 列表分页 page_size 上限
+LOG_QUERY_LIMIT_MAX = 20          # 生图日志查询条数上限
+PROMPT_SHORT_LEN = 15             # 日志/查询中 prompt 摘要截断长度
+DISPLAY_PROMPT_LEN = 20           # 文生图/指令显示 prompt 预览长度
+DISPLAY_CMD_LEN = 30              # 预设指令显示预览长度
+API_TIMEOUT_MIN_SECONDS = 10      # API 超时下限
+LOG_IMAGE_MAX_BYTES = 20 * 1024 * 1024  # 日志图片大小上限（20MB），超过返回 413
+
+
+def _choice_rank(key: str, value: str) -> float:
+    """返回 choices 字符串参数的可比数值：size 用 _SIZE_RANK，其余尝试转 float；无法比较返回 -1。"""
+    if key == "size":
+        return _SIZE_RANK.get(value, -1)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return -1.0
+
+
+def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
+    """返回 allowed_sizes 中数值最大（4K>2K>1K）的分辨率；列表为空返回 None。"""
+    if not allowed_sizes:
+        return None
+    return max(allowed_sizes, key=lambda s: _SIZE_RANK.get(s, 0))
 
 
 def _coerce_param_value(key: str, value: Any, clamp: bool) -> tuple:
@@ -66,7 +93,22 @@ def _coerce_param_value(key: str, value: Any, clamp: bool) -> tuple:
                 return True, value[:max_len]
             return False, None
         choices = schema.get("choices")
-        if choices and value not in choices:
+        if choices:
+            if value in choices:
+                return True, value
+            if clamp:
+                # choices 越界夹取：取「数值上不超过输入值的最大可选项」；无匹配则取数值最大者
+                target = _choice_rank(key, value)
+                best = None
+                for c in choices:
+                    r = _choice_rank(key, c)
+                    if r is None:
+                        continue
+                    if target is not None and r <= target and (best is None or r > _choice_rank(key, best)):
+                        best = c
+                if best is None:
+                    best = max(choices, key=lambda c: _choice_rank(key, c) or -1)
+                return True, best
             return False, None
         return True, value
     if ptype == "float":
@@ -114,18 +156,6 @@ def _merge_params(*dicts: Optional[Dict]) -> Dict:
     return merged
 
 
-# 分辨率数值排序（用于 allowed_sizes 夹取到最大可用）
-_SIZE_RANK = {"1K": 1, "2K": 2, "4K": 3}
-_ALLOWED_SIZE_VALUES = tuple(_SIZE_RANK.keys())
-
-
-def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
-    """返回 allowed_sizes 中数值最大（4K>2K>1K）的分辨率；列表为空返回 None。"""
-    if not allowed_sizes:
-        return None
-    return max(allowed_sizes, key=lambda s: _SIZE_RANK.get(s, 0))
-
-
 @register(
     "astrbot_plugin_nova_newimage",
     "辉宝",
@@ -149,7 +179,9 @@ class FigurineProPlugin(Star):
         self.group_models: Dict[str, str] = {}
         self.generation_history_file = self.plugin_data_dir / "generation_history.json"
         self.generation_history: List[Dict[str, Any]] = []
-        self._history_lock = asyncio.Lock()  # 生图时间线并发追加/落盘锁
+        self._history_lock = asyncio.Lock()  # 生图时间线并发追加/删除/落盘锁
+        self._counts_lock = asyncio.Lock()   # 用户/群组次数 check-modify-write 串行化锁（防并发竞态）
+        self._bg_tasks: set = set()          # 后台生图任务引用集合（防 GC + terminate 时回收）
         self._log_page_msgid: Dict[Any, Any] = {}  # (会话, 发送者) -> {"msgid": 消息id, "page": 页码, "scope": 范围, "count": 条数}
         self.prompt_map: Dict[str, str] = {}
         self.key_index = 0
@@ -199,7 +231,7 @@ class FigurineProPlugin(Star):
                 logger.info(f"  [{m['name']}] 每次消耗 {m['quota']} 次{_desc}")
         await self._load_group_models()
         await self._load_generation_history()
-        self.api_timeout = max(10, int(self.conf.get("api_timeout", 120)))
+        self.api_timeout = max(API_TIMEOUT_MIN_SECONDS, int(self.conf.get("api_timeout", 120)))
         logger.info(f"NewImage: API请求超时时间设置为 {self.api_timeout}s")
         # 加载用户持有次数上限
         try:
@@ -277,13 +309,15 @@ class FigurineProPlugin(Star):
                 except (TypeError, ValueError):
                     quota = 1
             if len(parts) >= 3:
-                desc = parts[2].strip()
+                # desc 半角分号已由 _web_models_post 转义为全角，此处还原（round-trip 对称）
+                desc = parts[2].strip().replace("；", ";")
             if len(parts) >= 4:
                 raw_params = parts[3].strip()
                 if raw_params:
                     try:
                         parsed = json.loads(raw_params)
                     except (ValueError, TypeError):
+                        # 容错回退：JSON 解析失败时保留 name/quota/desc，params 置空，不丢弃整个模型
                         logger.warning(f"[NewImage] 模型 {name} 的参数JSON解析失败，已忽略: {raw_params}")
                         parsed = None
                     if isinstance(parsed, dict):
@@ -327,11 +361,6 @@ class FigurineProPlugin(Star):
         entry = self._get_model_entry(name)
         return int(entry.get("quota", 1)) if entry else 1
 
-    def _get_model_desc(self, name: str) -> str:
-        """返回该模型说明（找不到返回空串）。"""
-        entry = self._get_model_entry(name)
-        return str(entry.get("desc", "")) if entry else ""
-
     def _get_model_default_params(self, name: str) -> Dict:
         """返回该模型默认生成参数（params 的副本；找不到或无参数返回空 dict）。"""
         entry = self._get_model_entry(name)
@@ -347,22 +376,26 @@ class FigurineProPlugin(Star):
         return entry.get("allowed_sizes")
 
     def _parse_and_validate_params(self, text: str, allowed_extra: Dict[str, str]) -> tuple:
-        """从指令文本中提取 `键:值` 生成参数。
+        """从指令文本**开头**提取连续 `键:值` 生成参数（只取前缀段，避免误伤 prompt 正文）。
 
         返回 (params_dict, cleaned_text)：
             - params_dict: 提取且校验通过的参数（仅 PARAM_SCHEMA 已知键 + allowed_extra 透传键）
-            - cleaned_text: 移除已提取参数后的 prompt 文本
-        校验失败返回 (None, 错误消息)。未知键不提取，留在原文本。
+            - cleaned_text: 移除已提取参数前缀后的 prompt 文本（原样保留剩余内容，不删任何字）
+        校验失败返回 (None, 错误消息)。未知键不是参数，立即停止提取并把剩余文本原样返回。
         """
         if not text:
             return {}, text
         params: Dict = {}
-        cleaned_parts: List[str] = []
-        last = 0
-        for m in _PARAM_EXTRACT_RE.finditer(text):
+        pos = 0
+        n = len(text)
+        # 只匹配开头的连续参数段：`键:值`（值支持 "..." 引号或非空白非冒号串）
+        while pos < n:
+            m = re.match(r'\s*([a-z_]+):("(?:[^"\\]|\\.)*"|[^\s:]+)', text[pos:])
+            if not m:
+                break  # 开头不是参数，停止提取
             key, raw_val = m.group(1), m.group(2)
             if key not in PARAM_SCHEMA and key not in allowed_extra:
-                continue
+                break  # 未知键不是参数，停止并原样保留（含本次匹配前的空白）
             # 去掉引号（支持 "..." 包裹的值，允许空格/冒号）
             if raw_val.startswith('"') and raw_val.endswith('"'):
                 try:
@@ -379,10 +412,8 @@ class FigurineProPlugin(Star):
             else:
                 # allowed_extra 透传键：原样保留
                 params[key] = val
-            cleaned_parts.append(text[last:m.start()])
-            last = m.end()
-        cleaned_parts.append(text[last:])
-        return params, "".join(cleaned_parts).strip()
+            pos += m.end()
+        return params, text[pos:].lstrip()
 
     def _sanitize_params(self, raw: Dict, source: str) -> tuple:
         """对传入参数 dict（LLM 工具/Web API 等）做温和清洗。
@@ -505,14 +536,14 @@ class FigurineProPlugin(Star):
         initial_messages: List[str] = []
         display_cmd = cmd
         if is_bnn:
-            MAX_IMAGES = 5
+            MAX_IMAGES = MAX_IMAGES_PER_REQUEST
             original_count = len(img_bytes_list)
             if original_count > MAX_IMAGES:
                 images_to_process = img_bytes_list[:MAX_IMAGES]
                 initial_messages.append(f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…")
             else:
                 images_to_process = img_bytes_list
-            display_cmd = user_prompt[:20] + '...' if len(user_prompt) > 20 else user_prompt
+            display_cmd = user_prompt[:DISPLAY_PROMPT_LEN] + '...' if len(user_prompt) > DISPLAY_PROMPT_LEN else user_prompt
             initial_messages.append(f"🎨 检测到 {len(images_to_process)} 张图片，正在生成 [{display_cmd}]...")
         else:
             if not img_bytes_list:
@@ -523,7 +554,7 @@ class FigurineProPlugin(Star):
             # 处理预设+补充的显示逻辑（清除 @ 文本避免显示中出现 @昵称）
             full_cmd_text = re.sub(r'@\S+?\(\d+\)', '', text).strip()
             full_cmd_text = re.sub(r'@\S+', '', full_cmd_text).strip()
-            display_cmd = full_cmd_text[:30] + '...' if len(full_cmd_text) > 30 else full_cmd_text
+            display_cmd = full_cmd_text[:DISPLAY_CMD_LEN] + '...' if len(full_cmd_text) > DISPLAY_CMD_LEN else full_cmd_text
             initial_messages.append(f"🎨 收到请求，正在生成 [{display_cmd}]...")
 
         slot_acquired = False
@@ -606,7 +637,7 @@ class FigurineProPlugin(Star):
                 yield event.plain_result(err)
                 return
 
-        display_prompt = prompt[:20] + '...' if len(prompt) > 20 else prompt
+        display_prompt = prompt[:DISPLAY_PROMPT_LEN] + '...' if len(prompt) > DISPLAY_PROMPT_LEN else prompt
         slot_acquired = False
         try:
             if not await self._acquire_group_slot(group_id):
@@ -733,12 +764,14 @@ class FigurineProPlugin(Star):
             self.user_counts = {}
 
     async def _save_user_counts(self):
+        # 说明：调用方须已持 self._counts_lock（保证 check-modify-write 原子），此处不再重复加锁
         await save_json(self.user_counts_file, self.user_counts)
 
     def _get_user_count(self, user_id: str) -> int:
         return self.user_counts.get(str(user_id), 0)
 
     async def _decrease_user_count(self, user_id: str, amount: int = 1):
+        # 说明：由持 self._counts_lock 的调用方（_consume_quota）调用，避免嵌套死锁
         user_id_str = str(user_id)
         amount = max(1, int(amount))
         count = self._get_user_count(user_id_str)
@@ -754,12 +787,14 @@ class FigurineProPlugin(Star):
             self.group_counts = {}
 
     async def _save_group_counts(self):
+        # 说明：调用方须已持 self._counts_lock（保证 check-modify-write 原子），此处不再重复加锁
         await save_json(self.group_counts_file, self.group_counts)
 
     def _get_group_count(self, group_id: str) -> int:
         return self.group_counts.get(str(group_id), 0)
 
     async def _decrease_group_count(self, group_id: str, amount: int = 1):
+        # 说明：由持 self._counts_lock 的调用方（_consume_quota）调用，避免嵌套死锁
         group_id_str = str(group_id)
         amount = max(1, int(amount))
         count = self._get_group_count(group_id_str)
@@ -797,17 +832,23 @@ class FigurineProPlugin(Star):
                 return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「辉宝赐福」获取次数。"
         return None
 
-    async def _consume_quota(self, sender_id: str, group_id: Optional[str], count: int = 1) -> None:
+    async def _consume_quota(self, sender_id: str, group_id: Optional[str], count: int = 1) -> str:
         """生成成功后扣减次数：群组优先于个人，单一来源扣减（管理员豁免由调用方保证）。
 
         count: 本次生成实际消耗的次数（默认 1）。
         语义：群次数 >= count 则扣群 count；否则若用户次数 >= count 则扣用户 count（与检查一致，不叠加）。
+        用 self._counts_lock 包裹「检查-修改-写盘」，保证并发下原子（decrease_* 内部不加锁避免死锁）。
+        返回实际扣减来源：'group' / 'user'；未扣到返回 ''（供调用方展示对应来源的剩余次数）。
         """
         count = max(1, int(count))
-        if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) >= count:
-            await self._decrease_group_count(group_id, amount=count)
-        elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) >= count:
-            await self._decrease_user_count(sender_id, amount=count)
+        async with self._counts_lock:
+            if self.conf.get("enable_group_limit", False) and group_id and self._get_group_count(group_id) >= count:
+                await self._decrease_group_count(group_id, amount=count)
+                return "group"
+            elif self.conf.get("enable_user_limit", True) and self._get_user_count(sender_id) >= count:
+                await self._decrease_user_count(sender_id, amount=count)
+                return "user"
+        return ""
 
     async def _load_user_checkin_data(self):
         data = await load_json(self.user_checkin_file)
@@ -848,8 +889,8 @@ class FigurineProPlugin(Star):
         # 加锁防止多群/并发生图时 read-modify-write 丢记录
         async with self._history_lock:
             self.generation_history.append(record)
-            if len(self.generation_history) > 500:
-                self.generation_history = self.generation_history[-500:]
+            if len(self.generation_history) > GENERATION_HISTORY_MAX:
+                self.generation_history = self.generation_history[-GENERATION_HISTORY_MAX:]
             await self._save_generation_history()
 
     async def _save_generation(self, group_id: Optional[str], user_id: str, prompt: str, model: str,
@@ -917,34 +958,36 @@ class FigurineProPlugin(Star):
             yield event.plain_result(f"您今天已经领取过辉宝赐福。\n剩余次数: {self._get_user_count(user_id)}")
             return
         # 检查是否已达到持有上限
-        current_count = self._get_user_count(user_id)
-        if self.user_count_cap > 0 and current_count >= self.user_count_cap:
-            yield event.plain_result(f"📦 您的生图次数已存满（{current_count}/{self.user_count_cap}），无法继续累积。\n请先使用后再来签到哦~")
-            return
-        reward = 0
-        if str(self.conf.get("enable_random_checkin", False)).lower() == 'true':
-            min_reward = max(1, int(self.conf.get("checkin_random_reward_min", 1)))
-            max_reward = max(min_reward, int(self.conf.get("checkin_random_reward_max", 5)))
-            reward = random.randint(min_reward, max_reward)
-        else:
-            reward = int(self.conf.get("checkin_fixed_reward", 3))
-        new_count = current_count + reward
-        # 如果设置了上限，截断到上限
-        if self.user_count_cap > 0 and new_count > self.user_count_cap:
-            new_count = self.user_count_cap
-            actual_reward = new_count - current_count
-            self.user_counts[user_id] = new_count
-            await self._save_user_counts()
-            self.user_checkin_data[user_id] = today_str
-            await self._save_user_checkin_data()
-            yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {actual_reward} 次（已达上限 {self.user_count_cap}），当前生图剩余: {new_count} 次。")
-        else:
-            self.user_counts[user_id] = new_count
-            await self._save_user_counts()
-            self.user_checkin_data[user_id] = today_str
-            await self._save_user_checkin_data()
-            cap_info = f"（上限 {self.user_count_cap}）" if self.user_count_cap > 0 else ""
-            yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {reward} 次，当前生图剩余: {new_count}{cap_info} 次。")
+        # 用 _counts_lock 包裹「读-判-写-盘」，保证签到并发下 user_counts 修改原子
+        async with self._counts_lock:
+            current_count = self._get_user_count(user_id)
+            if self.user_count_cap > 0 and current_count >= self.user_count_cap:
+                yield event.plain_result(f"📦 您的生图次数已存满（{current_count}/{self.user_count_cap}），无法继续累积。\n请先使用后再来签到哦~")
+                return
+            reward = 0
+            if str(self.conf.get("enable_random_checkin", False)).lower() == 'true':
+                min_reward = max(1, int(self.conf.get("checkin_random_reward_min", 1)))
+                max_reward = max(min_reward, int(self.conf.get("checkin_random_reward_max", 5)))
+                reward = random.randint(min_reward, max_reward)
+            else:
+                reward = int(self.conf.get("checkin_fixed_reward", 3))
+            new_count = current_count + reward
+            # 如果设置了上限，截断到上限
+            if self.user_count_cap > 0 and new_count > self.user_count_cap:
+                new_count = self.user_count_cap
+                actual_reward = new_count - current_count
+                self.user_counts[user_id] = new_count
+                await self._save_user_counts()
+                self.user_checkin_data[user_id] = today_str
+                await self._save_user_checkin_data()
+                yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {actual_reward} 次（已达上限 {self.user_count_cap}），当前生图剩余: {new_count} 次。")
+            else:
+                self.user_counts[user_id] = new_count
+                await self._save_user_counts()
+                self.user_checkin_data[user_id] = today_str
+                await self._save_user_checkin_data()
+                cap_info = f"（上限 {self.user_count_cap}）" if self.user_count_cap > 0 else ""
+                yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {reward} 次，当前生图剩余: {new_count}{cap_info} 次。")
 
     @filter.command("生图增加用户次数", prefix_optional=True)
     async def on_add_user_counts(self, event: AstrMessageEvent):
@@ -963,11 +1006,12 @@ class FigurineProPlugin(Star):
             yield event.plain_result(
                 '格式错误:\n#生图增加用户次数 @用户 <次数>\n或 #生图增加用户次数 <QQ号> <次数>')
             return
-        current_count = self._get_user_count(target_qq)
-        new_count = current_count + count
-        # 管理员手动增加不受次数上限（user_count_cap）限制
-        self.user_counts[str(target_qq)] = new_count
-        await self._save_user_counts()
+        async with self._counts_lock:
+            current_count = self._get_user_count(target_qq)
+            new_count = current_count + count
+            # 管理员手动增加不受次数上限（user_count_cap）限制
+            self.user_counts[str(target_qq)] = new_count
+            await self._save_user_counts()
         yield event.plain_result(f"✅ 已为用户 {target_qq} 增加次数，TA当前剩余 {new_count} 次（管理员增加不受上限限制）。")
 
     @filter.command("生图增加群组次数", prefix_optional=True)
@@ -978,9 +1022,10 @@ class FigurineProPlugin(Star):
             yield event.plain_result('格式错误: #生图增加群组次数 <群号> <次数>')
             return
         target_group, count = match.group(1), int(match.group(2))
-        current_count = self._get_group_count(target_group)
-        self.group_counts[str(target_group)] = current_count + count
-        await self._save_group_counts()
+        async with self._counts_lock:
+            current_count = self._get_group_count(target_group)
+            self.group_counts[str(target_group)] = current_count + count
+            await self._save_group_counts()
         yield event.plain_result(f"✅ 已为群组 {target_group} 增加 {count} 次，该群当前剩余 {current_count + count} 次。")
 
     @filter.command("生图查询次数", prefix_optional=True)
@@ -1121,28 +1166,32 @@ class FigurineProPlugin(Star):
         if action == "删除":
             if len(parts) == 2:
                 ts = parts[1]
-                before = len(self.generation_history)
-                self.generation_history = [r for r in self.generation_history if r.get("timestamp") != ts]
-                removed = before - len(self.generation_history)
+                async with self._history_lock:
+                    before = len(self.generation_history)
+                    self.generation_history = [r for r in self.generation_history if r.get("timestamp") != ts]
+                    removed = before - len(self.generation_history)
+                    if removed:
+                        await self._save_generation_history()
                 if removed:
-                    await self._save_generation_history()
                     yield event.plain_result(f"✅ 已删除 {removed} 条时间戳为 {ts} 的生图记录。")
                 else:
                     yield event.plain_result(f"❌ 未找到时间戳为 {ts} 的生图记录。")
                 return
             if len(parts) == 4:
                 scope_key, start_ts, end_ts = parts[1], parts[2], parts[3]
-                remaining = []
-                for r in self.generation_history:
-                    r_ts = r.get("timestamp", "")
-                    in_range = start_ts <= r_ts <= end_ts  # %Y%m%d_%H%M%S_%f 时间戳按字符串比较即时间序（含微秒基本唯一）
-                    in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
-                    if not (in_range and in_scope):
-                        remaining.append(r)
-                removed = len(self.generation_history) - len(remaining)
-                self.generation_history = remaining
+                async with self._history_lock:
+                    remaining = []
+                    for r in self.generation_history:
+                        r_ts = r.get("timestamp", "")
+                        in_range = start_ts <= r_ts <= end_ts  # %Y%m%d_%H%M%S_%f 时间戳按字符串比较即时间序（含微秒基本唯一）
+                        in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
+                        if not (in_range and in_scope):
+                            remaining.append(r)
+                    removed = len(self.generation_history) - len(remaining)
+                    self.generation_history = remaining
+                    if removed:
+                        await self._save_generation_history()
                 if removed:
-                    await self._save_generation_history()
                     yield event.plain_result(f"✅ 已删除 {removed} 条生图记录（范围: {scope_key}, {start_ts} ~ {end_ts}）。")
                 else:
                     yield event.plain_result(f"❌ 该范围内没有生图记录。")
@@ -1167,7 +1216,7 @@ class FigurineProPlugin(Star):
             args = args[1:]
         if args:
             try:
-                count = max(1, min(int(args[0]), 20))
+                count = max(1, min(int(args[0]), LOG_QUERY_LIMIT_MAX))
             except ValueError:
                 await _send("❌ 条数格式错误（应为数字，最大 20）。")
                 return
@@ -1193,7 +1242,7 @@ class FigurineProPlugin(Star):
             return
         lines = []
         for r in page_records:
-            prompt_short = str(r.get("prompt", ""))[:15]
+            prompt_short = str(r.get("prompt", ""))[:PROMPT_SHORT_LEN]
             lines.append(f"{r.get('timestamp','?')} | {r.get('file_path','?')} | {prompt_short} | "
                          f"{r.get('group_id','') or 'private'} | {r.get('user_id','?')}")
         msg = (f"📋 生图日志（第 {page}/{total_pages} 页，本页 {len(page_records)} 条，"
@@ -1252,8 +1301,11 @@ class FigurineProPlugin(Star):
             # 异步生图：立即返回给 LLM（不阻塞其回复），实际生成放后台任务，完成后自动发送到会话
             # 对 LLM 传入的 params 做温和清洗（夹取/丢弃），再传入后台任务
             cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
-            asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
-                                                     params=cleaned_params))
+            task = asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
+                                                            params=cleaned_params))
+            # 保存后台任务引用（防 GC），结束后自动从集合移除；terminate 时统一回收
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
             return "已开始生成图片，生成完成后会自动发送到当前会话，请稍候。"
 
         async def _async_generate(self, event: AstrMessageEvent, prompt: str, model: str = "", quota: int = 1,
@@ -1287,17 +1339,19 @@ class FigurineProPlugin(Star):
                 res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id,
                                                        model_override=model or None, gen_params=params or None)
                 if isinstance(res, bytes):
+                    # 记录实际扣减来源（群/个人），剩余次数展示与扣减来源一致
+                    consumed_from = ""
                     if not self.is_global_admin(event):
-                        await self._consume_quota(sender_id, group_id, count=quota)
+                        consumed_from = await self._consume_quota(sender_id, group_id, count=quota)
                     try:
                         await self._save_generation(group_id, sender_id, prompt, used_model, res)
                     except Exception as e:
                         logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
                     # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
-                    if self.conf.get("enable_user_limit", True):
-                        remaining = self._get_user_count(sender_id)
-                    else:
+                    if consumed_from == "group":
                         remaining = self._get_group_count(group_id) if group_id else 0
+                    else:
+                        remaining = self._get_user_count(sender_id)
                     try:
                         await event.send(MessageChain(chain=[
                             Image.fromBytes(res),
@@ -1345,7 +1399,7 @@ class FigurineProPlugin(Star):
             """
             scope_val = (scope or "").strip() or "本群"
             try:
-                limit = max(1, min(int(limit) if limit else 10, 20))
+                limit = max(1, min(int(limit) if limit else 10, LOG_QUERY_LIMIT_MAX))
             except (TypeError, ValueError):
                 limit = 10
             records = list(self.generation_history)
@@ -1377,7 +1431,7 @@ class FigurineProPlugin(Star):
                 return "暂无生图记录"
             lines = []
             for r in records:
-                prompt_short = str(r.get("prompt", ""))[:15]
+                prompt_short = str(r.get("prompt", ""))[:PROMPT_SHORT_LEN]
                 lines.append(f"{r.get('timestamp','?')} | {r.get('group_id','') or 'private'} | {prompt_short} | "
                              f"{r.get('file_path','?')}")
             return "生图记录如下：\n" + "\n".join(lines)
@@ -1922,7 +1976,8 @@ class FigurineProPlugin(Star):
                     return error_response(f"模型 {name} 的配额必须为整数")
                 if quota < 1:
                     return error_response(f"模型 {name} 的配额必须 >= 1")
-                desc = str(m.get("desc", "")).strip()
+                # desc 中的半角分号转义为全角（防与模型行分隔符冲突），解析时还原（见 _parse_available_models）
+                desc = str(m.get("desc", "")).strip().replace(";", "；")
                 # 接受 params（dict），用 _sanitize_params 温和清洗（夹取/丢弃）后序列化为第 4 段 JSON
                 raw_params = m.get("params")
                 if raw_params is None:
@@ -1957,7 +2012,7 @@ class FigurineProPlugin(Star):
         try:
             search = (request.query.get("search", "") or "").strip()
             page = max(1, request.query.get("page", 1, type=int))
-            page_size = max(1, min(request.query.get("page_size", 20, type=int), 200))
+            page_size = max(1, min(request.query.get("page_size", 20, type=int), WEB_PAGE_SIZE_MAX))
             items = [{"qq": uid, "count": cnt} for uid, cnt in self.user_counts.items()]
             if search:
                 items = [it for it in items if search in it["qq"]]
@@ -1984,11 +2039,12 @@ class FigurineProPlugin(Star):
                 return error_response("amount 必须为整数")
             if amount < 1:
                 return error_response("amount 必须 >= 1")
-            current_count = self._get_user_count(qq)
-            new_count = current_count + amount
-            # 管理员豁免 cap——不受 user_count_cap 截断
-            self.user_counts[str(qq)] = new_count
-            await self._save_user_counts()
+            async with self._counts_lock:
+                current_count = self._get_user_count(qq)
+                new_count = current_count + amount
+                # 管理员豁免 cap——不受 user_count_cap 截断
+                self.user_counts[str(qq)] = new_count
+                await self._save_user_counts()
             return json_response({"ok": True, "count": new_count})
         except Exception as e:
             return error_response(str(e))
@@ -1999,7 +2055,7 @@ class FigurineProPlugin(Star):
         try:
             search = (request.query.get("search", "") or "").strip()
             page = max(1, request.query.get("page", 1, type=int))
-            page_size = max(1, min(request.query.get("page_size", 20, type=int), 200))
+            page_size = max(1, min(request.query.get("page_size", 20, type=int), WEB_PAGE_SIZE_MAX))
             items = [{"group_id": gid, "count": cnt} for gid, cnt in self.group_counts.items()]
             if search:
                 items = [it for it in items if search in it["group_id"]]
@@ -2026,10 +2082,11 @@ class FigurineProPlugin(Star):
                 return error_response("amount 必须为整数")
             if amount < 1:
                 return error_response("amount 必须 >= 1")
-            current_count = self._get_group_count(group_id)
-            new_count = current_count + amount
-            self.group_counts[str(group_id)] = new_count
-            await self._save_group_counts()
+            async with self._counts_lock:
+                current_count = self._get_group_count(group_id)
+                new_count = current_count + amount
+                self.group_counts[str(group_id)] = new_count
+                await self._save_group_counts()
             return json_response({"ok": True, "count": new_count})
         except Exception as e:
             return error_response(str(e))
@@ -2051,8 +2108,9 @@ class FigurineProPlugin(Star):
                 return error_response("count 必须为整数")
             if count < 0:
                 return error_response("count 必须 >= 0")
-            self.user_counts[str(qq)] = count
-            await self._save_user_counts()
+            async with self._counts_lock:
+                self.user_counts[str(qq)] = count
+                await self._save_user_counts()
             return json_response({"ok": True, "count": count})
         except Exception as e:
             return error_response(str(e))
@@ -2074,8 +2132,9 @@ class FigurineProPlugin(Star):
                 return error_response("count 必须为整数")
             if count < 0:
                 return error_response("count 必须 >= 0")
-            self.group_counts[str(group_id)] = count
-            await self._save_group_counts()
+            async with self._counts_lock:
+                self.group_counts[str(group_id)] = count
+                await self._save_group_counts()
             return json_response({"ok": True, "count": count})
         except Exception as e:
             return error_response(str(e))
@@ -2124,33 +2183,35 @@ class FigurineProPlugin(Star):
             payload = await request.json(default={})
             if not isinstance(payload, dict):
                 return error_response("请求体必须是 JSON 对象")
-            before = len(self.generation_history)
-            remaining = list(self.generation_history)
-            if "timestamps" in payload:
-                ts_set = set(str(t) for t in payload.get("timestamps", []) if str(t).strip())
-                if not ts_set:
-                    return error_response("timestamps 不能为空")
-                remaining = [r for r in remaining if str(r.get("timestamp", "")) not in ts_set]
-            elif "start" in payload and "end" in payload:
-                start_ts = str(payload.get("start", "")).strip()
-                end_ts = str(payload.get("end", "")).strip()
-                if not start_ts or not end_ts:
-                    return error_response("范围删除需要 start 与 end 时间戳")
-                scope_key = str(payload.get("scope", "全局") or "全局")
-                kept = []
-                for r in self.generation_history:
-                    r_ts = str(r.get("timestamp", ""))
-                    in_range = start_ts <= r_ts <= end_ts
-                    in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
-                    if not (in_range and in_scope):
-                        kept.append(r)
-                remaining = kept
-            else:
-                return error_response("需要提供 timestamps 或 scope+start+end")
-            removed = before - len(remaining)
-            if removed:
-                self.generation_history = remaining
-                await self._save_generation_history()
+            # 用 _history_lock 包裹「读-筛选-改-盘」，与 _append_generation_history 一致，
+            # 防止删除期间并发生成追加导致 read-modify-write 丢记录
+            async with self._history_lock:
+                remaining = list(self.generation_history)
+                if "timestamps" in payload:
+                    ts_set = set(str(t) for t in payload.get("timestamps", []) if str(t).strip())
+                    if not ts_set:
+                        return error_response("timestamps 不能为空")
+                    remaining = [r for r in remaining if str(r.get("timestamp", "")) not in ts_set]
+                elif "start" in payload and "end" in payload:
+                    start_ts = str(payload.get("start", "")).strip()
+                    end_ts = str(payload.get("end", "")).strip()
+                    if not start_ts or not end_ts:
+                        return error_response("范围删除需要 start 与 end 时间戳")
+                    scope_key = str(payload.get("scope", "全局") or "全局")
+                    kept = []
+                    for r in self.generation_history:
+                        r_ts = str(r.get("timestamp", ""))
+                        in_range = start_ts <= r_ts <= end_ts
+                        in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
+                        if not (in_range and in_scope):
+                            kept.append(r)
+                    remaining = kept
+                else:
+                    return error_response("需要提供 timestamps 或 scope+start+end")
+                removed = len(self.generation_history) - len(remaining)
+                if removed:
+                    self.generation_history = remaining
+                    await self._save_generation_history()
             return json_response({"ok": True, "deleted": removed})
         except Exception as e:
             return error_response(str(e))
@@ -2179,6 +2240,13 @@ class FigurineProPlugin(Star):
                 return error_response("非法路径", 400)
             if not resolved.is_file():
                 return error_response("文件不存在", 404)
+            # 大文件限制：超过阈值（20MB）拒绝，避免超大图片撑爆 base64/内存
+            try:
+                file_size = resolved.stat().st_size
+            except OSError:
+                return error_response("文件读取失败", 404)
+            if file_size > LOG_IMAGE_MAX_BYTES:
+                return error_response("图片过大（超过 20MB）", 413)
             # 扩展名 → content_type
             ext = resolved.suffix.lower()
             content_type = {
@@ -2273,6 +2341,8 @@ class FigurineProPlugin(Star):
                     self.group_task_limit = max(0, int(self.conf.get("group_task_limit", 2)))
                 except (TypeError, ValueError):
                     self.group_task_limit = 0
+                # 并发任务计数在限制变化后不再准确，清空让各群重新计数
+                self.group_task_counts.clear()
             if "is_gemini_api" in saved:
                 self.is_gemini_api = bool(self.conf.get("is_gemini_api", False))
             if "safety_level" in saved:
@@ -2286,5 +2356,11 @@ class FigurineProPlugin(Star):
             return error_response(str(e))
 
     async def terminate(self):
-        if self.iwf: await self.iwf.terminate()
+        # 回收在途后台生图任务（防止插件卸载时任务悬挂）；未完成的任务被 gather 等待/吞异常
+        if self._bg_tasks:
+            pending = list(self._bg_tasks)
+            self._bg_tasks.clear()
+            await asyncio.gather(*pending, return_exceptions=True)
+        if self.iwf:
+            await self.iwf.terminate()
         logger.info("[FigurinePro] 插件已终止")
