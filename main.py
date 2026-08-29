@@ -643,13 +643,10 @@ class FigurineProPlugin(Star):
             return
         current_count = self._get_user_count(target_qq)
         new_count = current_count + count
-        # 如果设置了上限，截断到上限
-        if self.user_count_cap > 0 and new_count > self.user_count_cap:
-            new_count = self.user_count_cap
+        # 管理员手动增加不受次数上限（user_count_cap）限制
         self.user_counts[str(target_qq)] = new_count
         await self._save_user_counts()
-        cap_info = f"（上限 {self.user_count_cap}）" if self.user_count_cap > 0 else ""
-        yield event.plain_result(f"✅ 已为用户 {target_qq} 增加次数，TA当前剩余 {new_count}{cap_info} 次。")
+        yield event.plain_result(f"✅ 已为用户 {target_qq} 增加次数，TA当前剩余 {new_count} 次（管理员增加不受上限限制）。")
 
     @filter.command("生图增加群组次数", prefix_optional=True)
     async def on_add_group_counts(self, event: AstrMessageEvent):
@@ -915,32 +912,51 @@ class FigurineProPlugin(Star):
                     except Exception as e:
                         logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                     return f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
-            res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id)
-            if isinstance(res, bytes):
-                if not self.is_global_admin(event):
-                    await self._consume_quota(sender_id, group_id)
-                # 落盘 + 记录时间线
-                try:
-                    await self._save_generation(group_id, sender_id, prompt, used_model, res)
-                except Exception as e:
-                    logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
-                # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
-                if self.conf.get("enable_user_limit", True):
-                    remaining = self._get_user_count(sender_id)
+            # 异步生图：立即返回给 LLM（不阻塞其回复），实际生成放后台任务，完成后自动发送到会话
+            asyncio.create_task(self._async_generate(event, prompt))
+            return "已开始生成图片，生成完成后会自动发送到当前会话，请稍候。"
+
+        async def _async_generate(self, event: AstrMessageEvent, prompt: str) -> None:
+            """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。"""
+            sender_id = event.get_sender_id()
+            group_id = event.get_group_id()
+            slot_acquired = False
+            try:
+                if not await self._acquire_group_slot(group_id):
+                    try:
+                        await event.send(MessageChain(chain=[Plain("⚠️ 当前生图任务较多，请稍后再试。")]))
+                    except Exception as e:
+                        logger.error(f"[NewImage] 发送队列提示失败: {e}", exc_info=True)
+                    return
+                slot_acquired = True
+                res, used_model = await self._call_api([], prompt, image_size=None, group_id=group_id)
+                if isinstance(res, bytes):
+                    if not self.is_global_admin(event):
+                        await self._consume_quota(sender_id, group_id)
+                    try:
+                        await self._save_generation(group_id, sender_id, prompt, used_model, res)
+                    except Exception as e:
+                        logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
+                    # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
+                    if self.conf.get("enable_user_limit", True):
+                        remaining = self._get_user_count(sender_id)
+                    else:
+                        remaining = self._get_group_count(group_id) if group_id else 0
+                    try:
+                        await event.send(MessageChain(chain=[
+                            Image.fromBytes(res),
+                            Plain(f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"),
+                        ]))
+                    except Exception as e:
+                        logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
                 else:
-                    remaining = self._get_group_count(group_id) if group_id else 0
-                # 先发图给用户，再 return 文本回传 LLM 告知剩余次数
-                try:
-                    await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(f"✅ 已生成 | 模型: {used_model}")]))
-                except Exception as e:
-                    logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
-                return f"图片已生成完毕，且已自动发送到当前会话（工具已自动发送图片，请勿再重复发送图片）。该用户当前剩余次数: {remaining}。"
-            else:
-                try:
-                    await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
-                except Exception as e:
-                    logger.error(f"[NewImage] 发送生图失败提示失败: {e}", exc_info=True)
-                return f"生图失败：{res}"
+                    try:
+                        await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
+                    except Exception as e:
+                        logger.error(f"[NewImage] 发送生图失败提示失败: {e}", exc_info=True)
+            finally:
+                if slot_acquired:
+                    await self._release_group_slot(group_id)
 
         @filter.llm_tool(name="query_generation_quota")
         async def query_generation_quota(self, event: AstrMessageEvent, user_id: str = ""):
@@ -1212,7 +1228,9 @@ class FigurineProPlugin(Star):
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"Gemini API 请求失败: HTTP {resp.status}, 响应: {error_text}")
+                    logger.error(f"Gemini API 请求失败: HTTP {resp.status}, 响应: {error_text[:500]}")
+                    if resp.status >= 500:
+                        return f"⚠️ API 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
                     return f"Gemini API请求失败 (HTTP {resp.status}): {error_text[:300]}"
                 
                 data = await resp.json()
@@ -1320,7 +1338,9 @@ class FigurineProPlugin(Star):
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(f"API 请求失败: HTTP {resp.status}, 响应: {error_text}")
+                    logger.error(f"API 请求失败: HTTP {resp.status}, 响应: {error_text[:500]}")
+                    if resp.status >= 500:
+                        return f"⚠️ API 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
                     return f"API请求失败 (HTTP {resp.status}): {error_text[:200]}"
 
                 content_type = resp.headers.get("Content-Type", "")
