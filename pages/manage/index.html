@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>辉宝生图 · 管理台</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+  <!-- ======== 框架：侧边栏 + 主列 ======== -->
+  <div class="frame">
+
+    <!-- ======== 左侧边栏 ======== -->
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand-block">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        </span>
+        <span class="brand-name">辉宝生图</span>
+        <span class="brand-sub">NewImage 管理台</span>
+      </div>
+
+      <nav class="side-nav" aria-label="页面导航">
+        <button type="button" class="nav-item is-active" data-nav="models" aria-current="page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span>模型管理</span>
+        </button>
+        <button type="button" class="nav-item" data-nav="counts">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+          <span>次数管理</span>
+        </button>
+        <button type="button" class="nav-item" data-nav="logs">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+          <span>生图日志</span>
+        </button>
+        <button type="button" class="nav-item" data-nav="settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>基础设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="foot-txt">仅供 Dashboard 登录用户管理</span>
+      </div>
+    </aside>
+
+    <!-- ======== 主列 ======== -->
+    <div class="main-col">
+
+      <!-- ======== 顶栏 ======== -->
+      <header class="appbar">
+        <div class="appbar-inner">
+          <span class="appbar-brand">辉宝生图 <i>·</i> NewImage</span>
+          <h2 class="page-title" id="pageTitle">模型管理</h2>
+          <span class="appbar-spacer"></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnRefresh" title="刷新当前页">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+            <span>刷新</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- ======== 主内容 ======== -->
+      <main class="content">
+
+        <!-- ============ 页面：模型管理 ============ -->
+        <section class="page" data-page="models" id="page-models" aria-labelledby="pageTitle">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">可用模型</h3>
+                <p class="card-desc">配置生图模型：每次消耗配额、给 LLM 的说明、默认参数与允许分辨率。内联编辑后保存。</p>
+              </div>
+              <div class="card-actions">
+                <button type="button" class="btn btn-ghost" id="btnModelsReset">重置</button>
+                <button type="button" class="btn btn-accent" id="btnModelsSave">保存</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table" id="modelsTable">
+                <thead>
+                  <tr>
+                    <th style="width:22%">模型名</th>
+                    <th style="width:9%">每次消耗配额</th>
+                    <th style="width:26%">给LLM的说明</th>
+                    <th style="width:23%">默认参数 (JSON)</th>
+                    <th style="width:13%">允许分辨率</th>
+                    <th style="width:7%">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="modelsBody">
+                  <tr class="row-empty"><td colspan="6"><div class="skel"><span class="caret"></span>加载模型中…</div></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="card-foot">
+              <button type="button" class="btn btn-ghost btn-sm" id="btnModelsAdd">+ 添加模型</button>
+              <span class="card-foot-note" id="modelsNote">每行模型：名称;配额;说明;{参数JSON}，支持 sizes 键限制分辨率</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 页面：次数管理 ============ -->
+        <section class="page" data-page="counts" id="page-counts" hidden aria-label="次数管理">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">生图次数</h3>
+                <p class="card-desc">查看与充值用户 / 群组的生图次数，不受持有上限限制。</p>
+              </div>
+              <div class="segmented" id="countSeg" role="tablist" aria-label="次数类型">
+                <button type="button" class="seg-item is-active" data-count-kind="users" role="tab" aria-selected="true">用户次数</button>
+                <button type="button" class="seg-item" data-count-kind="groups" role="tab" aria-selected="false">群组次数</button>
+              </div>
+            </div>
+            <div class="card-toolbar">
+              <label class="search-box">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+                <input type="search" id="countSearch" placeholder="搜索 QQ / 群号…" aria-label="搜索">
+              </label>
+              <span class="toolbar-meta" id="countMeta">共 0 条</span>
+            </div>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th id="countIdHead">QQ 号</th>
+                    <th style="width:22%" class="num">次数</th>
+                    <th style="width:16%">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="countsBody">
+                  <tr class="row-empty"><td colspan="3"><div class="skel"><span class="caret"></span>加载次数中…</div></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="pager" id="countPager">
+              <button type="button" class="btn btn-ghost btn-sm" id="countPrev" disabled>上一页</button>
+              <span class="pager-info" id="countPageInfo">第 1 / 1 页</span>
+              <button type="button" class="btn btn-ghost btn-sm" id="countNext" disabled>下一页</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 页面：生图日志 ============ -->
+        <section class="page" data-page="logs" id="page-logs" hidden aria-label="生图日志">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">生图时间线</h3>
+                <p class="card-desc">按范围与时间筛选生图记录，卡片式浏览。缩略图为占位（页面无法直接读取服务器图片）。</p>
+              </div>
+              <div class="card-actions">
+                <label class="select-box">
+                  <select id="logScope" aria-label="范围">
+                    <option value="全局">全局</option>
+                    <option value="本群">本群</option>
+                  </select>
+                </label>
+                <label class="select-box">
+                  <select id="logDays" aria-label="时间">
+                    <option value="0">全部时间</option>
+                    <option value="1">今天</option>
+                    <option value="7">近 7 天</option>
+                    <option value="30">近 30 天</option>
+                  </select>
+                </label>
+                <label class="select-box">
+                  <select id="logGroup" aria-label="群号筛选">
+                    <option value="">全部群</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="log-list" id="logsBody">
+              <div class="skel skel-block"><span class="caret"></span>加载日志中…</div>
+            </div>
+            <div class="card-foot">
+              <button type="button" class="btn btn-ghost btn-sm" id="logsMore">加载更多</button>
+              <span class="card-foot-note" id="logsMeta">共 0 条</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 页面：基础设置 ============ -->
+        <section class="page" data-page="settings" id="page-settings" hidden aria-label="基础设置">
+          <div class="settings-grid">
+
+            <div class="card">
+              <div class="card-head"><h3 class="card-title">API 配置</h3></div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">API URL</span>
+                  <input type="text" id="cfgApiUrl" class="input" placeholder="https://api.example.com">
+                </label>
+                <label class="field">
+                  <span class="field-label">API Key（只读，掩码显示）</span>
+                  <input type="text" id="cfgApiKeys" class="input" readonly placeholder="未配置">
+                </label>
+                <label class="field field-row">
+                  <span class="field-label">Gemini 原生接口</span>
+                  <input type="checkbox" id="cfgIsGemini" class="switch">
+                </label>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3 class="card-title">Gemini 参数</h3></div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">安全过滤等级</span>
+                  <select id="cfgSafety" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="BLOCK_NONE">BLOCK_NONE 不过滤</option>
+                    <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH 仅过滤高危</option>
+                    <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE</option>
+                    <option value="BLOCK_LOW_AND_ABOVE">BLOCK_LOW_AND_ABOVE</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">全局默认分辨率</span>
+                  <select id="cfgImageSize" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="1K">1K</option>
+                    <option value="2K">2K</option>
+                    <option value="4K">4K</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">高分辨率白名单（每行一个 QQ）</span>
+                  <textarea id="cfgHires" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3 class="card-title">次数与队列</h3></div>
+              <div class="form">
+                <label class="field field-row">
+                  <span class="field-label">启用用户次数限制</span>
+                  <input type="checkbox" id="cfgEnableUser" class="switch">
+                </label>
+                <label class="field field-row">
+                  <span class="field-label">启用群组次数限制</span>
+                  <input type="checkbox" id="cfgEnableGroup" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">用户持有次数上限（0=不限）</span>
+                  <input type="number" id="cfgUserCap" class="input" min="0">
+                </label>
+                <label class="field">
+                  <span class="field-label">群并发生成任务数（0=不限）</span>
+                  <input type="number" id="cfgTaskLimit" class="input" min="0">
+                </label>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3 class="card-title">签到系统</h3></div>
+              <div class="form">
+                <label class="field field-row">
+                  <span class="field-label">开启每日签到（辉宝赐福）</span>
+                  <input type="checkbox" id="cfgEnableCheckin" class="switch">
+                </label>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3 class="card-title">权限</h3></div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">用户白名单（每行一个 QQ，空=全部）</span>
+                  <textarea id="cfgUserWhite" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                </label>
+                <label class="field">
+                  <span class="field-label">用户黑名单（每行一个 QQ）</span>
+                  <textarea id="cfgUserBlack" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
+          </div>
+          <div class="settings-save">
+            <button type="button" class="btn btn-accent" id="btnConfigSave">保存设置</button>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- ======== 充值弹层 ======== -->
+  <div class="modal-mask" id="rechargeModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rechargeTitle">
+      <div class="modal-head">
+        <h3 id="rechargeTitle">充值次数</h3>
+        <button type="button" class="btn-icon" id="rechargeClose" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc" id="rechargeDesc">目标：--</p>
+        <div class="chip-row" id="rechargeChips">
+          <button type="button" class="chip" data-amt="10">+10</button>
+          <button type="button" class="chip" data-amt="50">+50</button>
+          <button type="button" class="chip" data-amt="100">+100</button>
+          <button type="button" class="chip" data-amt="500">+500</button>
+        </div>
+        <label class="field">
+          <span class="field-label">自定义数量</span>
+          <input type="number" id="rechargeAmount" class="input" step="1" min="1" placeholder="例如 50">
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="rechargeCancel">取消</button>
+        <button type="button" class="btn btn-accent" id="rechargeConfirm">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== 查看大图弹层（占位：无图片 API） ======== -->
+  <div class="modal-mask" id="viewModal" hidden>
+    <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="viewTitle">
+      <div class="modal-head">
+        <h3 id="viewTitle">生图记录详情</h3>
+        <button type="button" class="btn-icon" id="viewClose" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="view-placeholder" id="viewPlaceholder">🖼 页面无法直接读取服务器图片，以下为记录信息</div>
+        <dl class="detail-list" id="viewDetail"></dl>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="viewCloseBtn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== Toast 容器 ======== -->
+  <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
