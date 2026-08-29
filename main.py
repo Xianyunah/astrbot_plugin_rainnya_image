@@ -130,7 +130,7 @@ def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
     "astrbot_plugin_nova_newimage",
     "辉宝",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.4.1",
+    "1.1.8",
     "https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage",
 )
 class FigurineProPlugin(Star):
