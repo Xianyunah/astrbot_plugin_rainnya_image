@@ -669,7 +669,8 @@ class FigurineProPlugin(Star):
                 break
         if not found: prompt_list.append(f"{key}:{new_value}")
 
-        await self.conf.set("prompt_list", prompt_list)
+        self.conf["prompt_list"] = prompt_list
+        await self.conf.save_config_async()
         await self._load_prompt_map()
         yield event.plain_result(f"✅ 已保存生图预设:\n{key}:{new_value}")
 
@@ -1009,7 +1010,8 @@ class FigurineProPlugin(Star):
         api_keys = self.conf.get("api_keys", [])
         added_keys = [key for key in new_keys if key not in api_keys]
         api_keys.extend(added_keys)
-        await self.conf.set("api_keys", api_keys)
+        self.conf["api_keys"] = api_keys
+        await self.conf.save_config_async()
         yield event.plain_result(f"✅ 操作完成，新增 {len(added_keys)} 个Key，当前共 {len(api_keys)} 个。")
 
     @filter.command("生图key列表", prefix_optional=True)
@@ -1026,11 +1028,13 @@ class FigurineProPlugin(Star):
         param = event.message_str.strip()
         api_keys = self.conf.get("api_keys", [])
         if param.lower() == "all":
-            await self.conf.set("api_keys", [])
+            self.conf["api_keys"] = []
+            await self.conf.save_config_async()
             yield event.plain_result(f"✅ 已删除全部 {len(api_keys)} 个 Key。")
         elif param.isdigit() and 1 <= int(param) <= len(api_keys):
             removed_key = api_keys.pop(int(param) - 1)
-            await self.conf.set("api_keys", api_keys)
+            self.conf["api_keys"] = api_keys
+            await self.conf.save_config_async()
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
             yield event.plain_result("格式错误，请使用 #生图删除key <序号|all>")
@@ -1858,8 +1862,10 @@ class FigurineProPlugin(Star):
             (f"{base}/models", self._web_models_post, ["POST"], "保存可用模型列表（含配额/说明）"),
             (f"{base}/users", self._web_users_get, ["GET"], "获取用户次数列表（分页/搜索）"),
             (f"{base}/users/add", self._web_users_add, ["POST"], "增加用户次数（不受上限限制）"),
+            (f"{base}/users/set", self._web_users_set, ["POST"], "设置用户次数为指定值（0 或任意非负整数）"),
             (f"{base}/groups", self._web_groups_get, ["GET"], "获取群组次数列表（分页/搜索）"),
             (f"{base}/groups/add", self._web_groups_add, ["POST"], "增加群组次数"),
+            (f"{base}/groups/set", self._web_groups_set, ["POST"], "设置群组次数为指定值（0 或任意非负整数）"),
             (f"{base}/logs", self._web_logs_get, ["GET"], "获取生图时间线（范围/天数/分页）"),
             (f"{base}/logs/image", self._web_logs_image, ["GET"], "获取生图图片（路径校验 + base64）"),
             (f"{base}/logs/delete", self._web_logs_delete, ["POST"], "删除生图时间线记录（按时间戳或范围）"),
@@ -1938,7 +1944,8 @@ class FigurineProPlugin(Star):
                     lines.append(f"{name};{quota};{desc}")
                 else:
                     lines.append(f"{name};{quota}")
-            await self.conf.set("model", "\n".join(lines))
+            # AstrBotConfig(dict) 无 set 方法：dict 赋值 + save_config_async 原子落盘
+            await self.conf.save_config_async({"model": "\n".join(lines)})
             self._parse_available_models()
             return json_response({"ok": True, "count": len(lines)})
         except Exception as e:
@@ -2024,6 +2031,52 @@ class FigurineProPlugin(Star):
             self.group_counts[str(group_id)] = new_count
             await self._save_group_counts()
             return json_response({"ok": True, "count": new_count})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_users_set(self):
+        """设置用户次数为指定值（0 或任意非负整数，不受 user_count_cap 上限限制）。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            qq = str(payload.get("qq", "")).strip()
+            if not qq:
+                return error_response("qq 不能为空")
+            try:
+                count = int(payload.get("count", 0))
+            except (TypeError, ValueError):
+                return error_response("count 必须为整数")
+            if count < 0:
+                return error_response("count 必须 >= 0")
+            self.user_counts[str(qq)] = count
+            await self._save_user_counts()
+            return json_response({"ok": True, "count": count})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_groups_set(self):
+        """设置群组次数为指定值（0 或任意非负整数）。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            group_id = str(payload.get("group_id", "")).strip()
+            if not group_id:
+                return error_response("group_id 不能为空")
+            try:
+                count = int(payload.get("count", 0))
+            except (TypeError, ValueError):
+                return error_response("count 必须为整数")
+            if count < 0:
+                return error_response("count 必须 >= 0")
+            self.group_counts[str(group_id)] = count
+            await self._save_group_counts()
+            return json_response({"ok": True, "count": count})
         except Exception as e:
             return error_response(str(e))
 
@@ -2182,6 +2235,8 @@ class FigurineProPlugin(Star):
             if "blacklist" in payload and "user_blacklist" not in payload:
                 payload["user_blacklist"] = payload.pop("blacklist")
             saved = []
+            # AstrBotConfig(dict) 无 set 方法：先收集更新项，最后一次性原子落盘（避免多次写盘）
+            config_updates: Dict[str, Any] = {}
             for key, expected in self._WEB_CONFIG_FIELD_TYPES.items():
                 if key not in payload:
                     continue
@@ -2203,8 +2258,10 @@ class FigurineProPlugin(Star):
                 elif expected is str:
                     if not isinstance(value, str):
                         return error_response(f"字段 {key} 必须为字符串")
-                await self.conf.set(key, value)
+                config_updates[key] = value
                 saved.append(key)
+            if config_updates:
+                await self.conf.save_config_async(config_updates)
             # 重载受影响的运行时状态
             if "user_count_cap" in saved:
                 try:
