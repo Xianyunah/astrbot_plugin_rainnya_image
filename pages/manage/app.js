@@ -1059,6 +1059,26 @@
     return String(v || "").split(/\r?\n/).map(function (s) { return s.trim(); }).filter(function (s) { return s; });
   }
 
+  /* 逐条解析 prompt_list：按「触发词:」行首前缀识别每条，value 取到下一触发词前的全部文本（保留内部换行），
+     避免 splitLines 按行切碎跨行提示词导致「无冒号碎片」报错 */
+  function parsePromptList(text) {
+    var s = String(text || "");
+    var out = [];
+    var re = /(?:^|\n)([^\n:]+):/g;
+    var m = null;
+    var prev = null; // {name, start} start 为上一触发词冒号后的位置
+    while ((m = re.exec(s)) !== null) {
+      if (prev) {
+        out.push(prev.name + ":" + s.slice(prev.start, m.index));
+      }
+      prev = { name: m[1].trim(), start: re.lastIndex };
+    }
+    if (prev) {
+      out.push(prev.name + ":" + s.slice(prev.start));
+    }
+    return out.filter(function (p) { return p.indexOf(":") > 0; });
+  }
+
   async function saveConfig() {
     var body = {
       /* 基础 */
@@ -1122,7 +1142,7 @@
       checkin_random_reward_max: parseInt(el("cfgCheckinMax").value, 10) || 0,
       /* 帮助与预设 */
       help_menu: el("cfgHelpMenu").value,
-      prompt_list: splitLines(el("cfgPromptList").value),
+      prompt_list: parsePromptList(el("cfgPromptList").value),
     };
     var btn = el("btnConfigSave");
     btn.disabled = true;

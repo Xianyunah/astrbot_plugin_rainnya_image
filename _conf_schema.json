@@ -336,6 +336,30 @@
     "hint": "匹配到的预设数低于此值则提示库中无匹配画师，需先在 WebUI 画师串管理添加。",
     "default": 3
   },
+  "danbooru_enabled": {
+    "description": "【画师推荐】是否启用 Danbooru 动态搜索",
+    "type": "bool",
+    "hint": "开启后，本地预设库匹配不足时自动回退到 Danbooru（danbooru.donmai.us）按需求标签动态搜索画师作为候选池。需要服务器能访问外网。",
+    "default": false
+  },
+  "danbooru_base_url": {
+    "description": "【画师推荐】Danbooru API 基础地址",
+    "type": "string",
+    "hint": "Danbooru 动态搜索使用的 API 基础地址，默认 https://danbooru.donmai.us，一般无需修改。",
+    "default": "https://danbooru.donmai.us"
+  },
+  "danbooru_limit": {
+    "description": "【画师推荐】Danbooru 候选画师上限",
+    "type": "int",
+    "hint": "Danbooru 动态搜索返回的最大候选画师数（1-50）。",
+    "default": 10
+  },
+  "danbooru_min_posts": {
+    "description": "【画师推荐】Danbooru 画师最低帖子数门槛",
+    "type": "int",
+    "hint": "候选画师在 Danbooru 的帖子数低于该值将被过滤（画师资历门槛），默认 100。",
+    "default": 100
+  },
   "novai_precheck_enabled": {
     "description": "【NovelAI】是否启用 token 预检",
     "type": "bool",

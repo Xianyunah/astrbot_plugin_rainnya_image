@@ -190,9 +190,38 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 
 | 命令 | 功能 |
 |:-----|:-----|
-| `>>文生图 <描述> [参数]` | 文生图，可带参数（如 `size:4K temperature:0.9`） |
+| `>>文生图 <描述> [参数]` | 文生图，可带参数（如 `size:portrait_medium temperature:0.9`） |
 | `bnn <想法>` | 自定义 Prompt 图生图（支持多图） |
 | `打标 <图片>` | 图片反推标签 |
+
+### 🎛️ 生成参数说明
+
+`文生图` 等指令可在描述前加 `键:值` 参数（空格分隔，多个可连用），**覆盖模型默认配置**：
+
+| 参数 | 取值 / 范围 | 示例 |
+|------|-------------|------|
+| `size` | NovelAI 档位 `portrait_small/medium/large`、`landscape_small/medium/large`、`square`；兼容旧值 `1K/2K/4K` | `size:portrait_medium` |
+| `temperature` | 0 - 2 | `temperature:0.9` |
+| `max_tokens` | 64 - 16384 | `max_tokens:2048` |
+| `steps` | 1 - 150 | `steps:28` |
+| `negative_prompt` | ≤500 字符；含逗号建议用引号包裹 | `negative_prompt:"bad hands, extra fingers"` |
+| `model` | 指定使用的模型名 | `model:nai-diffusion-4-5-full` |
+
+完整示例：
+
+```
+>>文生图 size:portrait_medium steps:28 negative_prompt:"bad hands" 一个女孩在樱花树下
+>>文生图 model:nai-diffusion-4-5-full temperature:1.1 赛博朋克街道夜景
+```
+
+> `size` 档位速查：竖·小 640×1536 / 竖·中 832×1216 / 竖·大 1024×1536 / 横·小 1536×640 / 横·中 1216×832 / 横·大 1536×1024 / 方图 1024×1024
+
+#### 其他指令参数速览
+
+- **画师串 / 画师推荐 / 打标**：不接受 `键:值` 参数，直接跟内容（预设名 / 图片）即可
+- **切换模型**：接受模型序号，如 `>>切换模型 2`
+- **生图日志**：接受子命令 `查询 / 单条查询 / 删除`
+- **次数 / 签到 / 管理命令**：无生成参数，直接使用（管理命令按要求填 QQ / 群号 / 次数）
 
 ### 🎨 画师串 / 画师推荐
 

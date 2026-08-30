@@ -108,6 +108,12 @@ NOVALAI_IMG2IMG_NOISE = 0.2
 NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
 
+# ========== Danbooru 动态搜索（画师推荐兜底） ==========
+DANBOORU_BASE_URL = "https://danbooru.donmai.us"
+DANBOORU_TIMEOUT = 15              # 单次请求超时（秒）
+DANBOORU_DEFAULT_LIMIT = 10        # 候选画师上限默认
+DANBOORU_DEFAULT_MIN_POSTS = 100   # 画师最低帖子数门槛默认
+
 # ========== NSFW 加密 ZIP（generate_image 工具 nsfw=true 用） ==========
 NSFW_ZIP_PASSWORD = "nsfwmiaomiao"   # NSFW 加密 ZIP 解压密码（硬编码，不配置、不暴露在 WebUI）
 NSFW_ZIP_ENTRY = "image.png"         # ZIP 内图片条目名
@@ -385,6 +391,25 @@ def _merge_params(*dicts: Optional[Dict]) -> Dict:
             if k in PARAM_SCHEMA:
                 merged[k] = v
     return merged
+
+
+def _rejoin_prompt_list(items: List[Any]) -> List[str]:
+    """容错重组 prompt_list：前端按换行切分会把跨行预设提示词切成多个数组元素。
+
+    规则：不含 ":" 的元素并入前一个元素（用 \\n 连接），还原成 触发词:提示词 对——
+    因为跨行提示词只有首行含触发词冒号，后续行是提示词正文的续行。
+    合并后仍无 ":" 的孤立元素（如最开头的残留片段）原样保留，由调用方校验报错。
+    """
+    rejoined: List[str] = []
+    for item in items:
+        s = str(item)
+        if ":" in s:
+            rejoined.append(s)
+        elif rejoined:
+            rejoined[-1] = f"{rejoined[-1]}\n{s}"
+        else:
+            rejoined.append(s)
+    return rejoined
 
 
 @register(
@@ -971,6 +996,7 @@ class FigurineProPlugin(Star):
         prompt_list = self.conf.get("prompt_list", [])
         for item in prompt_list:
             try:
+                # 按「首冒号」切分：元素内部可含换行（跨行提示词），value 保留换行原样加载
                 if ":" in item:
                     key, value = item.split(":", 1)
                     self.prompt_map[key.strip()] = value.strip()
@@ -1138,7 +1164,9 @@ class FigurineProPlugin(Star):
         prompt = event.message_str.strip()
         prompt = prompt.removeprefix("文生图").strip()  # 剥指令名，完整保留多词描述，不依赖 parsed_params
         if not prompt:
-            yield event.plain_result("📝 用法：文生图 <画面描述>\n例如：>>文生图 一个人走在樱花林中漫步")
+            yield event.plain_result("📝 用法：文生图 <画面描述>\n"
+                                     "可加参数：>>文生图 model:模型名 size:portrait_medium steps:28 negative_prompt:\"bad hands\" 一个女孩...\n"
+                                     "参数详解见 >>生图帮助")
             return
 
         sender_id = event.get_sender_id()
@@ -1148,11 +1176,14 @@ class FigurineProPlugin(Star):
         # 从文生图 prompt 中提取分辨率（仅白名单用户 + Gemini 提供商）
         extracted_size = None
         prompt, extracted_size = self._extract_image_size(prompt, sender_id, group_id=group_id)
-        # 提取生成参数（键:值），校验失败明确报错不生成
-        gen_params, prompt = self._parse_and_validate_params(prompt, {})
+        # 提取生成参数（键:值），校验失败明确报错不生成；支持 model: 指定本次生图模型（透传 allowed_extra）
+        gen_params, prompt = self._parse_and_validate_params(prompt, {"model": "str"})
         if gen_params is None:
             yield event.plain_result(f"❌ {prompt}")
             return
+        model_override = ""
+        if gen_params and "model" in gen_params:
+            model_override = str(gen_params.pop("model") or "").strip()
         if not prompt:
             yield event.plain_result("请提供文生图的描述（分辨率参数不能作为唯一输入）。")
             return
@@ -1188,7 +1219,8 @@ class FigurineProPlugin(Star):
             start_time = datetime.now()
             # 调用通用API，但传入空的图片列表
             res, used_model = await self._call_api([], prompt, image_size=extracted_size, group_id=group_id,
-                                                   gen_params=gen_params or None, size_strict=True)
+                                                   gen_params=gen_params or None, size_strict=True,
+                                                   model_override=model_override or None)
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if isinstance(res, bytes):
@@ -1267,7 +1299,12 @@ class FigurineProPlugin(Star):
             msg += ">>三视图 / >>角色设定 / >>高清修复 / >>鬼图 等 40+ 预设\n"
             msg += "（>>生图帮助 <预设名> 可查看该预设的提示词）\n\n"
             msg += "✏️ 文生图：\n"
-            msg += ">>文生图 <画面描述>\n\n"
+            msg += ">>文生图 <画面描述>\n"
+            msg += "示例：>>文生图 size:portrait_medium steps:28 negative_prompt:\"bad hands\" 一个女孩...\n\n"
+            msg += "📝 生成参数（可选，加在描述前）：\n"
+            msg += "size:分辨率（可选 portrait_small/medium/large、landscape_small/medium/large、square、1K/2K/4K）\n"
+            msg += "steps:1-150 ｜ temperature:0-2 ｜ max_tokens:64-16384 ｜ negative_prompt:负面词（含空格请用引号包裹）\n"
+            msg += "model:模型名（指定本次生图模型，不填用本群默认）\n\n"
             msg += "🎨 自定义图生图：\n"
             msg += "bnn <你的绘画想法>（可一次带多张图）\n\n"
             msg += "🎁 次数与签到：\n"
@@ -1807,6 +1844,121 @@ class FigurineProPlugin(Star):
             logger.error(f"[NewImage] LLM 生成失败: {e}", exc_info=True)
             return None
 
+    async def _danbooru_search_artists(self, tags: str, limit: int = 10) -> List[Dict]:
+        """Danbooru 动态搜索画师（本地预设库匹配不足时的兜底）。
+
+        流程：
+        - 标签中含明确画师名（artist:xxx / @xxx）→ tags.json 精确/模糊查详情 + related_tag 补充相关画师；
+        - 其余按风格标签 posts.json 统计出现画师 → 逐个 tags.json 查 post_count/category。
+        统一过滤 post_count >= danbooru_min_posts，按帖子数降序截取 limit。
+        返回 [{name, post_count, category}]；失败/超时/非 200 返回 []（不抛异常）。
+        """
+        iwf = self.iwf
+        if iwf is None:
+            return []
+        base = str(self.conf.get("danbooru_base_url", DANBOORU_BASE_URL) or "").strip().rstrip("/")
+        base = base or DANBOORU_BASE_URL
+        min_posts = max(0, int(self.conf.get("danbooru_min_posts", DANBOORU_DEFAULT_MIN_POSTS)
+                               or DANBOORU_DEFAULT_MIN_POSTS))
+        limit = max(1, min(int(limit or DANBOORU_DEFAULT_LIMIT), 50))
+        headers = {"User-Agent": NOVALAI_UA}
+
+        async def _get_json(path: str, params: Dict) -> Any:
+            try:
+                async with iwf.session.get(
+                    f"{base}{path}", params=params, headers=headers,
+                    proxy=iwf.proxy, timeout=DANBOORU_TIMEOUT,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"[NewImage] Danbooru 请求失败 {path}: HTTP {resp.status}")
+                        return None
+                    return await resp.json()
+            except Exception as e:
+                logger.warning(f"[NewImage] Danbooru 请求异常 {path}: {e}")
+                return None
+
+        async def _fetch_artist_info(name: str) -> Optional[Dict]:
+            """tags.json 精确/模糊查画师 tag 详情（category=1 优先，即 artist 类）。"""
+            payload = await _get_json("/tags.json", {
+                "search[category]": 1,
+                "search[name_matches]": name,
+                "search[hide_empty]": "true",
+                "limit": 5,
+            })
+            if isinstance(payload, list) and payload:
+                for item in payload:
+                    if str(item.get("name", "")).lower() == name.lower():
+                        return item
+                if int(payload[0].get("post_count", 0) or 0) > 0:
+                    return payload[0]
+            return None
+
+        # 1. 明确画师名（artist:xxx / @xxx）
+        explicit = list(dict.fromkeys(
+            re.findall(r"(?:artist\s*[:@]|\b@)([a-zA-Z0-9_\-()]+)", (tags or "").lower())
+        ))
+        # 2. 风格标签 → posts.json 统计画师出现次数
+        style_tags = [t for t in re.findall(r"[a-zA-Z0-9_]+", (tags or "").lower())
+                      if t not in explicit and not t.startswith("artist")]
+        artist_counter: Dict[str, int] = {}
+        if style_tags:
+            posts = await _get_json("/posts.json", {"tags": " ".join(style_tags[:5]), "limit": 100})
+            if isinstance(posts, list):
+                for post in posts:
+                    for a in str(post.get("tag_string_artist") or "").split():
+                        artist_counter[a] = artist_counter.get(a, 0) + 1
+        # 3. 相关画师补充（related_tag.json，仅对前 2 个明确画师）
+        related_names: List[str] = []
+        for name in explicit[:2]:
+            payload = await _get_json("/related_tag.json", {"query": f"artist:{name}", "category": 1})
+            related_items = payload.get("related_tags") if isinstance(payload, dict) else (
+                payload if isinstance(payload, list) else [])
+            for item in (related_items or [])[:8]:
+                rn = str((item or {}).get("tag", {}).get("name") or "").strip()
+                if rn and rn != name:
+                    related_names.append(rn)
+        # 4. 汇总候选名：明确画师优先 → posts 统计（按出现次数降序）→ 相关画师补充
+        ordered_by_posts = [n for n, _ in sorted(artist_counter.items(), key=lambda x: -x[1])]
+        candidate_names = list(dict.fromkeys(explicit + ordered_by_posts + related_names))
+        # 控制详情查询请求数（最多 min(20, limit*2 + explicit 数)）
+        detail_names = candidate_names[:max(len(explicit), min(20, limit * 2 + len(explicit)))]
+        # 5. 逐个查详情 + 过滤 min_posts
+        results: List[Dict] = []
+        for name in detail_names:
+            info = await _fetch_artist_info(name)
+            if not info:
+                continue
+            post_count = int(info.get("post_count", 0) or 0)
+            if post_count < min_posts:
+                continue
+            results.append({
+                "name": str(info.get("name") or name),
+                "post_count": post_count,
+                "category": int(info.get("category", 0) or 0),
+            })
+        # 6. 去重 + 降序 + 截取
+        seen: set = set()
+        out: List[Dict] = []
+        for r in sorted(results, key=lambda x: -x["post_count"]):
+            if r["name"] in seen:
+                continue
+            seen.add(r["name"])
+            out.append(r)
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _format_artist_candidate(candidate: Dict) -> str:
+        """候选画师池格式化：`- 画师名 (post_count)`（本地预设无 post_count 则省略）。"""
+        name = str(candidate.get("name") or "").strip()
+        if not name:
+            return ""
+        post_count = int(candidate.get("post_count") or 0)
+        if post_count > 0:
+            return f"- {name} ({post_count:,})"
+        return f"- {name}"
+
     @staticmethod
     def _strip_code_fence(text: str) -> str:
         """剥 code fence（```json ... ``` 等）。"""
@@ -1936,20 +2088,35 @@ class FigurineProPlugin(Star):
         search_text = extracted.lower()
         max_candidates = max(1, int(self.conf.get("artist_recommend_max_candidates", 10) or 10))
         min_match = max(1, int(self.conf.get("artist_recommend_min_match", 3) or 3))
-        matched: List[str] = []
+        matched: List[Dict] = []  # [{name, post_count, source}]：本地预设 + Danbooru 兜底候选
+        seen_names: set = set()
         for p in self.artist_presets:
             haystack = f"{p.get('name', '')} {p.get('artists', '')}".lower()
             score = sum(1 for kw in re.findall(r"[a-z0-9_@]+", search_text) if kw in haystack)
-            if score >= 1:
-                matched.append(p["name"])
-        matched = list(dict.fromkeys(matched))[:max_candidates]
+            if score >= 1 and p.get("name") not in seen_names:
+                seen_names.add(p["name"])
+                matched.append({"name": p["name"], "post_count": 0, "source": "preset"})
+        matched = matched[:max_candidates]
+        # 3. 本地匹配不足 → Danbooru 动态搜索兜底（danbooru_enabled 时）
+        if len(matched) < min_match and self.conf.get("danbooru_enabled", False):
+            danbooru_limit = max(1, int(self.conf.get("danbooru_limit", DANBOORU_DEFAULT_LIMIT)
+                                        or DANBOORU_DEFAULT_LIMIT))
+            danbooru_results = await self._danbooru_search_artists(extracted, limit=danbooru_limit)
+            if not danbooru_results:
+                yield event.plain_result("❌ Danbooru 搜索失败，请检查网络或稍后重试。")
+                return
+            for d in danbooru_results:
+                if d.get("name") not in seen_names:
+                    seen_names.add(d["name"])
+                    matched.append({"name": d["name"], "post_count": int(d.get("post_count", 0) or 0),
+                                    "source": "danbooru"})
         if len(matched) < min_match:
             names = "、".join(p.get("name", "") for p in self.artist_presets) or "（无）"
-            yield event.plain_result(f"❌ 库中匹配画师不足（需 ≥{min_match}，仅匹配 {len(matched)} 个）。"
-                                     f"请先在 WebUI 画师串管理中添加更多预设。\n当前库: {names}")
+            yield event.plain_result(f"❌ 候选画师不足（需 ≥{min_match}，仅匹配 {len(matched)} 个）。"
+                                     f"请先在 WebUI 画师串管理中添加更多预设（或开启 danbooru_enabled 动态搜索）。\n当前库: {names}")
             return
-        # 3. 组合画师串
-        pool_text = "\n".join(matched)
+        # 4. 组合画师串
+        pool_text = "\n".join(self._format_artist_candidate(c) for c in matched)
         model_version = str(self.conf.get("extra_prefix", "") or "")
         artist_prompt = ARTIST_FROM_POOL_TEMPLATE \
             .replace("<<USER_REQUEST>>", raw) \
@@ -1964,8 +2131,11 @@ class FigurineProPlugin(Star):
             yield event.plain_result("❌ 画师串生成为空，请稍后重试。")
             return
         self._last_artist_recommendation = artist_str
+        preset_count = sum(1 for c in matched if c.get("source") == "preset")
+        danbooru_count = len(matched) - preset_count
+        source_desc = f"库内 {preset_count} 个预设" + (f" + Danbooru {danbooru_count} 个" if danbooru_count else "")
         yield event.plain_result(
-            f"🎨 候选画师串（来自库内 {len(matched)} 个预设）：\n{artist_str}\n\n"
+            f"🎨 候选画师串（来自{source_desc}）：\n{artist_str}\n\n"
             f"💡 输入 `>>画师串保存 <名称>` 保存到预设库，或 `>>画师串 <名称>` 直接切换，`>>画师串 off` 放弃")
 
     @filter.command("画师串保存", prefix_optional=True)
@@ -3656,6 +3826,11 @@ class FigurineProPlugin(Star):
         "artist_recommend_enabled": bool,
         "artist_recommend_max_candidates": int,
         "artist_recommend_min_match": int,
+        # Danbooru 动态搜索（画师推荐兜底）
+        "danbooru_enabled": bool,
+        "danbooru_base_url": str,
+        "danbooru_limit": int,
+        "danbooru_min_posts": int,
         # NovelAI token 预检
         "novai_precheck_enabled": bool,
         "novai_precheck_timeout": int,
@@ -4345,6 +4520,11 @@ class FigurineProPlugin(Star):
                 "artist_recommend_enabled": bool(self.conf.get("artist_recommend_enabled", False)),
                 "artist_recommend_max_candidates": self.conf.get("artist_recommend_max_candidates", 10),
                 "artist_recommend_min_match": self.conf.get("artist_recommend_min_match", 3),
+                # Danbooru 动态搜索
+                "danbooru_enabled": bool(self.conf.get("danbooru_enabled", False)),
+                "danbooru_base_url": str(self.conf.get("danbooru_base_url", "") or ""),
+                "danbooru_limit": self.conf.get("danbooru_limit", 10),
+                "danbooru_min_posts": self.conf.get("danbooru_min_posts", 100),
                 # NovelAI token 预检
                 "novai_precheck_enabled": bool(self.conf.get("novai_precheck_enabled", True)),
                 "novai_precheck_timeout": self.conf.get("novai_precheck_timeout", 10),
@@ -4412,10 +4592,12 @@ class FigurineProPlugin(Star):
                     if not isinstance(value, list):
                         return error_response(f"字段 {key} 必须为数组")
                     if key == "prompt_list":
-                        # 预设列表：元素必须是字符串且含 ":"（触发词:提示词）
+                        # 预设列表：前端按换行切分会把跨行提示词切成多个数组元素（无冒号碎片）
+                        # → 后端先容错重组（无冒号元素并入前一个含冒号元素），重组后仍无冒号才报错
+                        value = _rejoin_prompt_list(value)
                         for item in value:
                             if not isinstance(item, str) or ":" not in item:
-                                return error_response("prompt_list 元素格式应为 触发词:提示词")
+                                return error_response("prompt_list 元素格式应为 触发词:提示词（含换行的提示词会被自动合并）")
                     value = [str(v) for v in value]
                 elif expected is str:
                     if not isinstance(value, str):
