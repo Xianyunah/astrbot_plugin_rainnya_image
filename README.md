@@ -1,7 +1,21 @@
-# 🎨 AstrBot NewImage Plugin（魔改增强版）
+# 🎨 AstrBot Rainnya Image Plugin（魔改增强版）
 
-> 基于 [`astrbot_plugin_nova_newimage`](https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage)（原作者：辉宝，v1.4.1）的 **AGPL-3.0 fork 魔改增强版**。
-> 保留了原版全部能力，并大幅增强：异步生图、WebUI 管理面板、多模型与配额、LLM 自主调用、生图日志等。
+> 本项目 `astrbot_plugin_rainnya_image` 基于上游原版 [`astrbot_plugin_nova_newimage`](https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage)（原作者：辉宝，v1.4.1）的 **AGPL-3.0 fork 魔改增强版**。
+> 保留了原版全部能力，并大幅增强：多提供商架构、WebUI 全量管理、异步生图、LLM 自主调用、生图日志等。
+
+## 🌟 项目特色
+
+相比原版，魔改版最直观的变化：**配置全部搬到 WebUI，生图全程自动化**，不再需要手写 JSON 或依赖 AstrBot 的 provider 配置。
+
+- **多提供商架构（WebUI 添加）**：像 AI coding 平台一样，在 WebUI 里添加 N 个提供商（Gemini / OpenAI / NovalAI 模板），各自填 API Key + BaseURL，每个提供商下挂自己的模型列表，互不干扰
+- **WebUI 全量管理面板**：提供商管理 / 次数管理 / 生图日志 / 全量设置 四个 Tab；「全量设置」把 AstrBot 配置面板的所有配置项整体搬到 WebUI，所见即所得
+- **NovelAI 路由**：文生图 / 图生图、v4_prompt 提示词、ZIP 响应自动解压
+- **LLM 工具全家福（7 个）**：生图（图 + 文）、查模型、查次数、查时间线、调历史图、使用统计、查预设，主对话 LLM 可自主调度
+- **异步生图 + 统一时间线**：工具调用不阻塞对话，后台生成完成自动发图；所有图片落盘并汇总到时间线，随时可查可删
+- **按群切换模型 + 模型配额**：每个群独立切换模型；模型可按次消耗不同配额，支持默认参数与分辨率限制
+- **废弃 AstrBot provider_id**：不再使用 AstrBot 的 provider_id 下拉，连接方式完全由 WebUI 里的提供商接管
+
+---
 
 ## 🚀 魔改增强特性（相对原版）
 
@@ -11,7 +25,7 @@
 
 ### 🖥️ WebUI 管理面板（插件 Pages）
 - 内嵌于 AstrBot WebUI 的完整管理页，替代/补充难懂的配置面板
-- 板块：**模型管理**（可视化编辑模型列表/配额/参数/分辨率限制）、**次数管理**（用户/群组查询与充值）、**生图日志**（时间线可视化、筛选、删除）、**基础设置**（友好表单）
+- 板块：**提供商管理**（WebUI 添加多提供商，每个提供商下管理自己的模型列表/配额/参数/分辨率限制）、**次数管理**（用户/群组查询与充值）、**生图日志**（时间线可视化、筛选、删除）、**全量设置**（AstrBot 配置面板全量搬运，友好表单）
 - 纯 HTML/CSS/JS 实现，跟随 AstrBot 亮/暗主题
 
 ### 🎛️ 多模型 + 配额 + 详细参数
@@ -115,21 +129,28 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 
 ### 其他配置
 
+> API 连接相关（`provider_id`/`api_url`/`api_keys`/`is_gemini_api`）已废弃，**统一改由 WebUI「提供商管理」接管**：添加多个提供商（Gemini/OpenAI/NovalAI 模板）、各自填 API Key + BaseURL、下挂模型列表。其余配置项在 WebUI「全量设置」中即可完成，以下列出供参考：
+
 | 配置项 | 类型 | 说明 |
 |--------|------|------|
-| `provider_id` | 下拉 | 从 AstrBot 已配置的提供商中选择 |
-| `api_url` | 字符串 | API 地址（手动配置） |
-| `api_keys` | 列表 | API 密钥列表，支持多 Key 轮换 |
-| `is_gemini_api` | 开关 | 是否 Gemini 原生接口 |
+| `prefix` / `extra_prefix` | 开关 / 字符串 | 是否要求指令带前缀 / 自定义前缀（如 `bnn`） |
+| `use_proxy` / `proxy_url` | 开关 / 字符串 | 是否使用代理 / 代理地址 |
+| `download_timeout` / `download_retries` | 整数 | 图片下载超时（秒）/ 下载重试次数 |
+| `api_timeout` | 整数 | API 请求超时（秒） |
 | `safety_level` | 字符串 | Gemini 安全过滤等级 |
 | `image_size` | 字符串 | Gemini 全局默认分辨率 |
 | `hires_whitelist` | 列表 | 高分辨率白名单 |
-| `help_menu` | 文本 | `>>生图帮助` 显示的自定义内容（留空用默认） |
+| `user_whitelist` / `user_blacklist` | 列表 | 用户白名单 / 黑名单 |
+| `group_whitelist` / `group_blacklist` | 列表 | 群白名单 / 黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 开关 | 用户/群组次数限制 |
 | `user_count_cap` | 整数 | 用户持有次数上限（0=不限，签到受此限制，管理员手动增加不受限） |
 | `group_task_limit` | 整数 | 单群同时处理任务数 |
 | `enable_checkin` | 开关 | 每日签到 |
-| `api_timeout` | 整数 | API 请求超时（秒） |
+| `checkin_fixed_reward` | 整数 | 签到固定奖励次数 |
+| `enable_random_checkin` | 开关 | 随机奖励模式 |
+| `checkin_random_reward_min` / `max` | 整数 | 随机奖励下限 / 上限 |
+| `help_menu` | 文本 | `>>生图帮助` 显示的自定义内容（留空用默认） |
+| `prompt_list` | 列表 | 预设 prompt（`触发词:提示词`，每行一个） |
 
 ---
 
@@ -184,10 +205,12 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 ## 📝 更新日志
 
 ### 魔改增强版（2026-08）
-- 🚀 异步生图：LLM 工具调用不阻塞对话，后台生成自动发图
-- 🖥️ 新增 WebUI 管理面板（模型/次数/日志/设置）
+- 🏗️ 多提供商架构：WebUI 添加多个提供商（Gemini/OpenAI/NovalAI 模板），每个提供商下挂自己的模型列表，废弃 AstrBot provider_id
+- 🖥️ WebUI 管理面板（提供商/次数/日志/全量设置），全量设置从 AstrBot 配置面板整体搬运
 - 🎛️ 多模型配置（`模型名;配额;说明;参数JSON`）+ 按模型配额 + 详细参数 + 分辨率限制
-- 🤖 LLM 自主工具调用（生图/次数查询/时间线查询）
+- 🚀 异步生图：LLM 工具调用不阻塞对话，后台生成自动发图
+- 🤖 LLM 自主工具调用（生图/查模型/查次数/查时间线/调历史图/使用统计/查预设，共 7 个）
+- 🎨 NovelAI 路由：文生图/图生图、v4_prompt、ZIP 响应解压
 - 📜 生图落盘 + 统一时间线日志 + `生图日志` 指令
 - 📝 帮助菜单可配置（`help_menu`）
 - 🔧 管理员加次数无上限、5xx 报错友好化、拆分多模块架构
@@ -215,7 +238,7 @@ A: 该模型参数 JSON 里写 `{"sizes":["1K"]}` 即可，指令指定更高分
 A: 能。主对话 LLM 支持 function calling 时会自动带上 `generate_image` 工具，用户说「帮我画一张…」即可触发，扩写提示词后调用。
 
 ### Q: WebUI 管理面板在哪？
-A: AstrBot 管理面板 → 插件详情页 → Pages 打开。包含模型管理、次数管理、生图日志、基础设置。
+A: AstrBot 管理面板 → 插件详情页 → Pages 打开。包含提供商管理、次数管理、生图日志、全量设置四个 Tab。API 连接（Key/BaseURL）与模型列表都在「提供商管理」里配。
 
 ### Q: 生成失败显示「服务端繁忙或超时」？
 A: 这是 API 服务端 5xx（如 504）的友好提示，可加大 `api_timeout` 或稍后重试/换模型。
@@ -237,6 +260,6 @@ A: 这是 API 服务端 5xx（如 504）的友好提示，可加大 `api_timeout
 
 ## 📄 开源协议
 
-本项目为 [astrbot_plugin_nova_newimage](https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage)（原作者：辉宝）的派生作品，基于原项目魔改增强，采用 **AGPL-3.0** 协议开源。修改内容与原作者无关，如有问题请联系本仓库维护者。
+本项目 `astrbot_plugin_rainnya_image` 为 [astrbot_plugin_nova_newimage](https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage)（原作者：辉宝）的派生作品，基于原项目魔改增强，采用 **AGPL-3.0** 协议开源。修改内容与原作者无关，如有问题请联系本仓库维护者。
 
 **Made with ❤️ for 喵喵**

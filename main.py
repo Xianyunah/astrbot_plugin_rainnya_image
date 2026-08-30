@@ -5,6 +5,7 @@ import io
 import json
 import random
 import re
+import shutil
 import time
 import zipfile
 from datetime import datetime, timedelta
@@ -188,11 +189,11 @@ def _merge_params(*dicts: Optional[Dict]) -> Dict:
 
 
 @register(
-    "astrbot_plugin_nova_newimage",
-    "辉宝",
+    "astrbot_plugin_rainnya_image",
+    "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
     "1.1.8",
-    "https://github.com/YumenoSayuri/astrbot_plugin_nova_newimage",
+    "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
 
@@ -200,6 +201,8 @@ class FigurineProPlugin(Star):
         super().__init__(context)
         self.conf = config
         self.plugin_data_dir = StarTools.get_data_dir()
+        # 旧数据目录自动迁移：改名后 get_data_dir() 返回新目录，旧目录数据搬入
+        self._migrate_legacy_data_dir()
         self.user_counts_file = self.plugin_data_dir / "user_counts.json"
         self.user_counts: Dict[str, int] = {}
         self.group_counts_file = self.plugin_data_dir / "group_counts.json"
@@ -237,6 +240,46 @@ class FigurineProPlugin(Star):
         # Web API 相关（供插件 WebUI 调用）
         self._web_registered = False
         self._register_web_apis()
+
+    def _migrate_legacy_data_dir(self) -> None:
+        """旧数据目录自动迁移（改名 astrbot_plugin_nova_newimage → astrbot_plugin_rainnya_image）。
+
+        改名后 StarTools.get_data_dir() 按 metadata.name 返回新目录（data/plugin_data/astrbot_plugin_rainnya_image），
+        旧目录显式写死为 parent / "astrbot_plugin_nova_newimage"（不依赖动态解析，杜绝歧义）。
+
+        迁移条件：旧目录存在、且与新目录不同（防自迁移）、且新目录尚未有同名条目。
+        方式：整体 shutil.move（新目录不存在时）；新目录已存在（get_data_dir 已 ensure_dir）则逐条 move 子项。
+        失败只 warn 不崩溃（数据缺失比插件崩好）。
+        """
+        old_dir = self.plugin_data_dir.parent / "astrbot_plugin_nova_newimage"
+        try:
+            if not old_dir.exists():
+                return
+            if old_dir.resolve() == self.plugin_data_dir.resolve():
+                logger.info(f"[NewImage] 数据目录已是新路径 {self.plugin_data_dir}，无需迁移")
+                return
+            # 已迁移过（旧目录残留空壳）直接跳过
+            if self.plugin_data_dir.exists() and any(self.plugin_data_dir.iterdir()):
+                logger.info(f"[NewImage] 新数据目录已有内容 {self.plugin_data_dir}，跳过旧目录迁移")
+                return
+            if not self.plugin_data_dir.exists():
+                # 新目录不存在：整体 move（含 generations 图片等所有条目）
+                shutil.move(str(old_dir), str(self.plugin_data_dir))
+            else:
+                # 新目录已存在但为空：逐条 move（文件 + 子目录都搬）
+                for item in old_dir.iterdir():
+                    target = self.plugin_data_dir / item.name
+                    if target.exists():
+                        continue  # 冲突跳过，保留新目录内容
+                    shutil.move(str(item), str(target))
+                # 旧目录搬空后清理空壳（失败可忽略）
+                try:
+                    old_dir.rmdir()
+                except OSError:
+                    pass
+            logger.info(f"[NewImage] 已从旧数据目录 {old_dir} 迁移数据到 {self.plugin_data_dir}")
+        except Exception as e:
+            logger.warning(f"[NewImage] 旧数据目录迁移失败（忽略，插件继续运行）: {e}")
 
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
@@ -2388,7 +2431,7 @@ class FigurineProPlugin(Star):
             return f"发生未知错误: {e}"
 
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
-    WEB_PLUGIN_NAME = "astrbot_plugin_nova_newimage"
+    WEB_PLUGIN_NAME = "astrbot_plugin_rainnya_image"
     # POST /config 白名单字段（键名 = conf 键名；api_url/api_keys/is_gemini_api/model/provider_id 已迁移到提供商，不再暴露）
     _WEB_CONFIG_FIELD_TYPES = {
         # 基础
