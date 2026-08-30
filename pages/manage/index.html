@@ -514,6 +514,66 @@
               </div>
             </div>
 
+            <!-- 画师预设 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">画师预设</h3>
+                  <p class="card-desc">全局画师串预设库（名字 + 画师串 + 负面词），并按群启用。</p>
+                </div>
+                <div class="card-actions">
+                  <button type="button" class="btn btn-accent" id="btnArtistPresetsSave">保存预设</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="table" id="artistPresetsTable">
+                  <thead>
+                    <tr>
+                      <th style="width:22%">预设名</th>
+                      <th style="width:38%">画师串</th>
+                      <th style="width:33%">负面词</th>
+                      <th style="width:7%">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="artistPresetsBody">
+                    <tr class="row-empty"><td colspan="4"><div class="skel"><span class="caret"></span>加载画师预设中…</div></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="card-foot">
+                <button type="button" class="btn btn-ghost btn-sm" id="btnArtistPresetsAdd">+ 添加预设</button>
+                <span class="card-foot-note" id="artistPresetsNote">画师串如 `artist:xxx, artist:yyy`，负面词可留空</span>
+              </div>
+
+              <div class="group-switch-block">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">按群启用</h3>
+                    <p class="card-desc">为指定群设置画师串预设；也可在群里用「画师串 预设名」指令切换。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field">
+                    <span class="field-label">群 ID</span>
+                    <input type="text" id="artistGroupId" class="input" placeholder="群号">
+                  </label>
+                  <label class="field">
+                    <span class="field-label">预设</span>
+                    <select id="artistGroupPreset" class="input">
+                      <option value="">（请先保存预设）</option>
+                    </select>
+                  </label>
+                  <div class="field field-row" style="grid-column: 1 / -1;">
+                    <div class="card-actions">
+                      <button type="button" class="btn btn-ghost btn-sm" id="btnArtistGroupSave">设为该预设</button>
+                      <button type="button" class="btn btn-danger btn-sm" id="btnArtistGroupOff">关闭</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="group-map-list" id="artistGroupMap"></div>
+              </div>
+            </div>
+
           </div>
           <div class="settings-save">
             <button type="button" class="btn btn-accent" id="btnConfigSave">保存设置</button>

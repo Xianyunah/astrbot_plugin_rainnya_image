@@ -211,6 +211,11 @@ class FigurineProPlugin(Star):
         self.user_checkin_data: Dict[str, str] = {}
         self.group_model_file = self.plugin_data_dir / "group_model.json"
         self.group_models: Dict[str, str] = {}
+        # 画师串预设（artist_presets.json：全局预设库；group_artist.json：按群开关）
+        self.artist_presets_file = self.plugin_data_dir / "artist_presets.json"
+        self.group_artist_file = self.plugin_data_dir / "group_artist.json"
+        self.artist_presets: List[Dict[str, Any]] = []
+        self.group_artists: Dict[str, str] = {}
         self.generation_history_file = self.plugin_data_dir / "generation_history.json"
         self.generation_history: List[Dict[str, Any]] = []
         self._history_lock = asyncio.Lock()  # 生图时间线并发追加/删除/落盘锁
@@ -302,6 +307,8 @@ class FigurineProPlugin(Star):
                 _desc = f" - {m['desc']}" if m.get("desc") else ""
                 logger.info(f"  [{m['name']}] 每次消耗 {m['quota']} 次{_desc}")
         await self._load_group_models()
+        await self._load_artist_presets()
+        await self._load_group_artists()
         await self._load_generation_history()
         self.api_timeout = max(API_TIMEOUT_MIN_SECONDS, int(self.conf.get("api_timeout", 120)))
         logger.info(f"NewImage: API请求超时时间设置为 {self.api_timeout}s")
@@ -1164,6 +1171,58 @@ class FigurineProPlugin(Star):
         """保存各群配置的生图模型映射 {群号: 模型名}"""
         await save_json(self.group_model_file, self.group_models)
 
+    async def _load_artist_presets(self):
+        """加载画师串预设库（[{name, artists, negative}]，name 去重保序）。"""
+        data = await load_json(self.artist_presets_file)
+        presets: List[Dict[str, Any]] = []
+        seen: set = set()
+        if isinstance(data, dict) and isinstance(data.get("presets"), list):
+            for p in data["presets"]:
+                if not isinstance(p, dict):
+                    continue
+                name = str(p.get("name", "") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                presets.append({
+                    "name": name,
+                    "artists": str(p.get("artists", "") or "").strip(),
+                    "negative": str(p.get("negative", "") or "").strip(),
+                })
+        self.artist_presets = presets
+
+    async def _save_artist_presets(self):
+        """原子写画师串预设库。"""
+        await save_json(self.artist_presets_file, {"presets": self.artist_presets})
+
+    async def _load_group_artists(self):
+        """加载各群画师串预设映射 {群号: 预设名}（空/"off" 视为关闭）。"""
+        data = await load_json(self.group_artist_file)
+        if isinstance(data, dict):
+            self.group_artists = {str(k): str(v) for k, v in data.items()}
+        else:
+            self.group_artists = {}
+
+    async def _save_group_artists(self):
+        """原子写各群画师串预设映射。"""
+        await save_json(self.group_artist_file, self.group_artists)
+
+    def _get_group_artist_preset(self, group_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """返回当前群激活的画师串预设（未配置/关闭/不存在 → None）。
+
+        group_artists[群号] = 预设名；空串或 "off" 视为关闭；预设名在库中不存在则忽略。
+        """
+        if not group_id:
+            return None
+        preset_name = self.group_artists.get(str(group_id), "")
+        preset_name = (preset_name or "").strip()
+        if not preset_name or preset_name.lower() == "off":
+            return None
+        for p in self.artist_presets:
+            if p.get("name") == preset_name:
+                return p
+        return None
+
     async def _load_generation_history(self):
         """加载生图时间线记录列表（每条 {timestamp, group_id, user_id, prompt, model, file_path}）"""
         data = await load_json(self.generation_history_file)
@@ -1410,6 +1469,63 @@ class FigurineProPlugin(Star):
             yield event.plain_result(f"❌ 序号超出范围（1-{len(self.available_models)}），请重新输入。")
             return
         yield event.plain_result("格式: >>切换模型 <序号>")
+
+    @filter.command("画师串", prefix_optional=True)
+    async def on_artist_preset(self, event: AstrMessageEvent):
+        """画师串预设：列出 / 按群切换 / 关闭。
+
+        - `画师串` → 列出所有预设 + 当前群激活的预设
+        - `画师串 <预设名>` → 当前群切换到该预设（写入 group_artist.json）
+        - `画师串 off` → 当前群关闭画师串
+        切换/关闭仅管理员可用（同「切换模型」）；私聊无法按群配置。
+        """
+        group_id = event.get_group_id()
+        param = event.message_str.strip()
+        param = param.removeprefix("画师串").strip()  # 兼容 message_str 带/不带指令名
+        if not group_id:
+            # 列出仍可用（公共信息），切换需群聊
+            if not param:
+                current = self.group_artists.get("", "")
+                lines = "\n".join(
+                    f"- {p['name']}" + (f"（负面: {p['negative']}）" if p.get("negative") else "")
+                    for p in self.artist_presets
+                ) if self.artist_presets else "（暂无画师串预设，请在 WebUI 画师串管理中配置）"
+                yield event.plain_result(f"🎨 可用画师串预设：\n{lines}")
+                return
+            yield event.plain_result("画师串按群切换仅支持在群聊中使用")
+            return
+        if not param:
+            # 列出所有预设 + 当前群激活
+            current = self.group_artists.get(str(group_id), "")
+            if self.artist_presets:
+                lines = "\n".join(
+                    f"- {p['name']}" + (" ← 当前" if p["name"] == current else "")
+                    + (f"（负面: {p['negative']}）" if p.get("negative") else "")
+                    for p in self.artist_presets
+                )
+            else:
+                lines = "（暂无画师串预设，请在 WebUI 画师串管理中配置）"
+            cur_tip = f"\n当前群激活: {current}" if current and current.lower() != "off" else "\n当前群未启用画师串"
+            yield event.plain_result(f"🎨 可用画师串预设：\n{lines}{cur_tip}\n输入 `>>画师串 <预设名>` 切换，`>>画师串 off` 关闭")
+            return
+        if not self.is_global_admin(event):
+            yield event.plain_result("仅管理员可切换画师串预设")
+            return
+        if param.lower() == "off":
+            self.group_artists.pop(str(group_id), None)
+            await self._save_group_artists()
+            logger.info(f"[NewImage] 群 {group_id} 的画师串已关闭")
+            yield event.plain_result("✅ 本群画师串已关闭")
+            return
+        target = next((p for p in self.artist_presets if p.get("name") == param), None)
+        if not target:
+            names = "、".join(p.get("name", "") for p in self.artist_presets) or "（暂无预设）"
+            yield event.plain_result(f"❌ 未找到画师串预设 [{param}]。可用预设：{names}")
+            return
+        self.group_artists[str(group_id)] = target["name"]
+        await self._save_group_artists()
+        logger.info(f"[NewImage] 群 {group_id} 的画师串已切换为: {target['name']}")
+        yield event.plain_result(f"✅ 本群画师串已切换为: {target['name']}")
 
     @filter.command("生图日志", prefix_optional=True)
     async def on_generation_log(self, event: AstrMessageEvent):
@@ -2040,6 +2156,20 @@ class FigurineProPlugin(Star):
                     final_params["size"] = max_avail
                     logger.info(f"[NewImage] 模型 {model_name} 不支持分辨率 {effective_size}，"
                                 f"已自动调整为允许的最大分辨率 {max_avail}")
+
+        # ========== 画师串预设合并（按群） ==========
+        # 当前群激活的画师串预设：prompt 追加 artists 串控画风；预设 negative 并入负面词。
+        artist_preset = self._get_group_artist_preset(group_id)
+        if artist_preset:
+            artists = str(artist_preset.get("artists", "") or "").strip()
+            preset_neg = str(artist_preset.get("negative", "") or "").strip()
+            if artists:
+                prompt = f"{prompt}, {artists}" if prompt else artists
+                logger.info(f"[NewImage] 群 {group_id} 应用画师串预设「{artist_preset.get('name', '')}」，prompt 追加画师标签")
+            if preset_neg:
+                existing_neg = str(final_params.get("negative_prompt", "") or "").strip()
+                final_params["negative_prompt"] = f"{existing_neg}, {preset_neg}" if existing_neg else preset_neg
+                logger.info(f"[NewImage] 群 {group_id} 画师串预设「{artist_preset.get('name', '')}」并入负面词")
 
         # ========== 按提供商 type 选择路由 ==========
         if provider_type == "gemini":
@@ -2760,6 +2890,10 @@ class FigurineProPlugin(Star):
             (f"{base}/logs/delete", self._web_logs_delete, ["POST"], "删除生图时间线记录（按时间戳或范围）"),
             (f"{base}/config", self._web_config_get, ["GET"], "获取全部设置（API 配置已迁移到提供商管理）"),
             (f"{base}/config", self._web_config_post, ["POST"], "保存全部设置（白名单字段，一次性原子落盘）"),
+            (f"{base}/artist-presets", self._web_artist_presets_get, ["GET"], "获取画师串预设库"),
+            (f"{base}/artist-presets", self._web_artist_presets_post, ["POST"], "保存画师串预设库"),
+            (f"{base}/artist-presets/group", self._web_artist_groups_get, ["GET"], "获取各群画师串激活映射"),
+            (f"{base}/artist-presets/group", self._web_artist_groups_post, ["POST"], "设置某群画师串预设"),
         ]
         for route, handler, methods, desc in endpoints:
             self.context.register_web_api(route, handler, methods, desc)
@@ -3251,6 +3385,94 @@ class FigurineProPlugin(Star):
             return json_response({"image": f"data:{content_type};base64,{b64}"})
         except Exception as e:
             logger.error(f"[NewImage] 读取生图图片失败: {e}", exc_info=True)
+            return error_response(str(e))
+
+    async def _web_artist_presets_get(self):
+        """GET {base}/artist-presets：返回画师串预设库。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            return json_response({"presets": self.artist_presets})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_artist_presets_post(self):
+        """POST {base}/artist-presets：保存画师串预设库。body {presets:[{name,artists,negative}]}。
+
+        name/artists 非空（negative 可空）；name 去重保序（重复取最后一个）。
+        """
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            presets = payload.get("presets")
+            if not isinstance(presets, list):
+                return error_response("presets 必须是数组")
+            cleaned: List[Dict[str, Any]] = []
+            seen: set = set()
+            for item in presets:
+                if not isinstance(item, dict):
+                    return error_response("presets 元素必须是对象")
+                name = str(item.get("name", "") or "").strip()
+                if not name:
+                    return error_response("预设名不能为空")
+                artists = str(item.get("artists", "") or "").strip()
+                if not artists:
+                    return error_response(f"预设 [{name}] 的画师串不能为空")
+                negative = str(item.get("negative", "") or "").strip()
+                if name in seen:
+                    # 重名：覆盖同名条目（保序）
+                    for existing in cleaned:
+                        if existing["name"] == name:
+                            existing["artists"] = artists
+                            existing["negative"] = negative
+                            break
+                    continue
+                seen.add(name)
+                cleaned.append({"name": name, "artists": artists, "negative": negative})
+            self.artist_presets = cleaned
+            await self._save_artist_presets()
+            await self._load_artist_presets()
+            return json_response({"ok": True, "count": len(self.artist_presets)})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_artist_groups_get(self):
+        """GET {base}/artist-presets/group：返回各群画师串激活映射。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            return json_response({"groups": self.group_artists})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_artist_groups_post(self):
+        """POST {base}/artist-presets/group：设置某群画师串预设。body {group_id, preset}。
+
+        preset 为空串或 "off" 表示关闭（移除该群配置）；否则须在预设库中存在。
+        """
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            group_id = str(payload.get("group_id", "") or "").strip()
+            if not group_id:
+                return error_response("group_id 不能为空")
+            preset = str(payload.get("preset", "") or "").strip()
+            if not preset or preset.lower() == "off":
+                self.group_artists.pop(group_id, None)
+                await self._save_group_artists()
+                return json_response({"ok": True, "preset": ""})
+            if not any(p.get("name") == preset for p in self.artist_presets):
+                return error_response(f"预设 [{preset}] 不存在")
+            self.group_artists[group_id] = preset
+            await self._save_group_artists()
+            return json_response({"ok": True, "preset": preset})
+        except Exception as e:
             return error_response(str(e))
 
     async def _web_config_get(self):

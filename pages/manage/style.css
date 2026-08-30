@@ -712,6 +712,39 @@ textarea.input {
   margin-top: 16px;
 }
 
+/* 画师预设：按群启用区块 */
+.group-switch-block {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+.group-map-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+.group-map-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+}
+.group-map-item .gm-preset {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.group-map-item .btn-danger { flex-shrink: 0; }
+
 /* ============ 12.5 提供商管理 ============ */
 /* 类型徽标（Gemini 蓝 / OpenAI 绿 / NovalAI 紫） */
 .type-badge {

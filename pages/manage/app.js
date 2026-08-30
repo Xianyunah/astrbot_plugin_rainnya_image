@@ -797,6 +797,154 @@
   }
 
   /* ============================================================
+   * 画师预设（设置页内）
+   * ============================================================ */
+  var artistPresetsData = []; // [{name, artists, negative}]
+  var artistGroupsData = {};  // {"群ID": "预设名"}
+
+  function syncArtistGroupPresetOptions() {
+    var sel = el("artistGroupPreset");
+    var cur = sel.value;
+    sel.innerHTML =
+      '<option value="">（选择预设）</option>' +
+      artistPresetsData.map(function (p) {
+        return '<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>";
+      }).join("");
+    // 尽量保留原选择；若已不存在回退到第一个
+    if (cur && artistPresetsData.some(function (p) { return p.name === cur; })) {
+      sel.value = cur;
+    } else if (artistPresetsData.length) {
+      sel.value = artistPresetsData[0].name;
+    }
+  }
+
+  function renderArtistPresets() {
+    var body = el("artistPresetsBody");
+    if (!artistPresetsData.length) {
+      body.innerHTML =
+        '<tr class="row-empty"><td colspan="4"><div class="empty">' +
+        '<span class="empty-main">暂无预设，点击「+ 添加预设」</span></div></td></tr>';
+      return;
+    }
+    body.innerHTML = artistPresetsData.map(function (p, i) {
+      return (
+        "<tr data-i=\"" + i + "\">" +
+        '<td><input class="cell-input" data-k="name" value="' + esc(p.name) + '" placeholder="预设名"></td>' +
+        '<td><input class="cell-input" data-k="artists" value="' + esc(p.artists) + '" placeholder="artist:xxx, artist:yyy"></td>' +
+        '<td><input class="cell-input" data-k="negative" value="' + esc(p.negative) + '" placeholder="负面词（可空）"></td>' +
+        '<td><button type="button" class="btn-icon" data-act="del" title="删除">' +
+        '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button></td>' +
+        "</tr>"
+      );
+    }).join("");
+  }
+
+  function collectArtistPresets() {
+    var rows = el("artistPresetsBody").querySelectorAll("tr[data-i]");
+    var out = [];
+    var seen = {};
+    var ok = true;
+    rows.forEach(function (tr) {
+      var p = { name: "", artists: "", negative: "" };
+      tr.querySelectorAll("[data-k]").forEach(function (inp) {
+        var k = inp.getAttribute("data-k");
+        var v = inp.value.trim();
+        if (k === "name") p.name = v;
+        else if (k === "artists") p.artists = v;
+        else if (k === "negative") p.negative = v;
+      });
+      if (!p.name || !p.artists) {
+        ok = false;
+        var nm = tr.querySelector('[data-k="name"]');
+        var ar = tr.querySelector('[data-k="artists"]');
+        if (nm && !nm.value.trim()) nm.classList.add("invalid");
+        if (ar && !ar.value.trim()) ar.classList.add("invalid");
+        return;
+      }
+      if (seen[p.name]) return; // 去重
+      seen[p.name] = true;
+      out.push(p);
+    });
+    return { ok: ok, presets: out };
+  }
+
+  async function loadArtistPresets() {
+    try {
+      var data = await apiGet("artist-presets");
+      artistPresetsData = (data && data.presets) || [];
+      renderArtistPresets();
+      syncArtistGroupPresetOptions();
+    } catch (e) {
+      toast("加载画师预设失败：" + e.message, "error");
+      el("artistPresetsBody").innerHTML =
+        '<tr class="row-empty"><td colspan="4"><div class="empty"><span class="empty-main">加载失败：' + esc(e.message) + "</span></div></td></tr>";
+    }
+  }
+
+  async function saveArtistPresets() {
+    var r = collectArtistPresets();
+    if (!r.ok) { toast("预设不合法：预设名与画师串不能为空", "error"); return; }
+    var btn = el("btnArtistPresetsSave");
+    btn.disabled = true;
+    try {
+      var res = await apiPost("artist-presets", { presets: r.presets });
+      artistPresetsData = r.presets;
+      renderArtistPresets();
+      syncArtistGroupPresetOptions();
+      toast("已保存 " + (res && res.count != null ? res.count : r.presets.length) + " 个预设", "success");
+    } catch (e) {
+      toast("保存失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderArtistGroups() {
+    var wrap = el("artistGroupMap");
+    var entries = Object.keys(artistGroupsData);
+    if (!entries.length) {
+      wrap.innerHTML = '<div class="empty"><span class="empty-main">暂无按群配置</span></div>';
+      return;
+    }
+    wrap.innerHTML = entries.map(function (gid) {
+      return (
+        '<div class="group-map-item" data-gid="' + esc(gid) + '">' +
+        '<span class="badge neutral">群 ' + esc(gid) + "</span>" +
+        '<span class="gm-preset">' + esc(artistGroupsData[gid]) + "</span>" +
+        '<button type="button" class="btn btn-danger btn-sm" data-act="off">关闭</button>' +
+        "</div>"
+      );
+    }).join("");
+  }
+
+  async function loadArtistGroups() {
+    try {
+      var data = await apiGet("artist-presets/group");
+      artistGroupsData = (data && data.groups) || {};
+      renderArtistGroups();
+    } catch (e) {
+      toast("加载按群画师预设失败：" + e.message, "error");
+    }
+  }
+
+  async function saveArtistGroup(preset) {
+    var gid = el("artistGroupId").value.trim();
+    if (!gid) { toast("请填写群 ID", "error"); return; }
+    var btn = el("btnArtistGroupSave");
+    btn.disabled = true;
+    try {
+      await apiPost("artist-presets/group", { group_id: gid, preset: preset });
+      toast(preset ? "已为群 " + gid + " 启用「" + preset + "」" : "已关闭群 " + gid + " 的画师预设", "success");
+      el("artistGroupId").value = "";
+      await loadArtistGroups();
+    } catch (e) {
+      toast("设置失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ============================================================
    * Tab 4 · 基础设置
    * ============================================================ */
   async function loadConfig() {
@@ -947,7 +1095,11 @@
     }
     else if (CURRENT === "counts") loadCounts(true);
     else if (CURRENT === "logs") loadLogs(true);
-    else if (CURRENT === "settings") loadConfig();
+    else if (CURRENT === "settings") {
+      loadConfig();
+      loadArtistPresets();
+      loadArtistGroups();
+    }
   }
 
   function bindEvents() {
@@ -1099,6 +1251,42 @@
 
     /* 设置 */
     el("btnConfigSave").addEventListener("click", saveConfig);
+
+    /* 画师预设 */
+    el("btnArtistPresetsAdd").addEventListener("click", function () {
+      artistPresetsData.push({ name: "", artists: "", negative: "" });
+      renderArtistPresets();
+      var last = el("artistPresetsBody").querySelector('tr[data-i="' + (artistPresetsData.length - 1) + '"]');
+      if (last) { var nm = last.querySelector('[data-k="name"]'); if (nm) nm.focus(); }
+    });
+    el("btnArtistPresetsSave").addEventListener("click", saveArtistPresets);
+    el("artistPresetsBody").addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-act='del']");
+      if (!btn) return;
+      var tr = btn.closest("tr[data-i]");
+      if (!tr) return;
+      var i = parseInt(tr.getAttribute("data-i"), 10);
+      var name = artistPresetsData[i] && artistPresetsData[i].name;
+      if (name && !confirm("确认删除预设「" + name + "」？（未保存前不生效）")) return;
+      artistPresetsData.splice(i, 1);
+      renderArtistPresets();
+    });
+    el("btnArtistGroupSave").addEventListener("click", function () {
+      saveArtistGroup(el("artistGroupPreset").value);
+    });
+    el("btnArtistGroupOff").addEventListener("click", function () {
+      var gid = el("artistGroupId").value.trim();
+      if (!gid) { toast("请填写群 ID", "error"); return; }
+      saveArtistGroup("");
+    });
+    el("artistGroupMap").addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-act='off']");
+      if (!btn) return;
+      var item = btn.closest(".group-map-item");
+      if (!item) return;
+      el("artistGroupId").value = item.getAttribute("data-gid");
+      saveArtistGroup("");
+    });
 
     /* Esc 关闭弹层 / 遮罩点击关闭 */
     document.addEventListener("keydown", function (e) {
