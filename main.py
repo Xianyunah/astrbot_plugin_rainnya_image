@@ -373,6 +373,8 @@ class FigurineProPlugin(Star):
         for p in self.providers:
             if not p.get("enabled", True):
                 continue  # 禁用的提供商不参与可用模型列表
+            if not str(p.get("base_url", "") or "").strip():
+                continue  # base_url 为空的提供商不可用，其模型不进可用列表（避免被当作默认模型）
             pid = str(p.get("id", ""))
             for m in (p.get("models") or []):
                 if not isinstance(m, dict):
@@ -396,7 +398,15 @@ class FigurineProPlugin(Star):
 
         type = gemini（is_gemini_api 开）/ openai；api_key = conf.api_keys[0]；
         base_url = conf.api_url；models = 复用 _parse_models_lines 解析 conf.model。
+
+        重要：conf.api_url 为空时返回空列表（不建空壳提供商）。
+        旧版若未配置手动 API，说明用户一直走 AstrBot provider_id 或根本没配过，没有可迁移的数据，
+        不应生成一个 base_url="" 的 stub 提供商污染 providers.json（否则会占住 available_models 首位，
+        导致后续 WebUI 添加的 novalai/openai 提供商模型永远排在被当作默认模型之后）。
         """
+        api_url = str(self.conf.get("api_url", "") or "").strip()
+        if not api_url:
+            return []
         raw_model = str(self.conf.get("model", "") or "")
         models = self._parse_models_lines(raw_model.split("\n"))
         keys = self.conf.get("api_keys", []) or []
@@ -406,7 +416,7 @@ class FigurineProPlugin(Star):
             "name": "默认提供商",
             "type": "gemini" if bool(self.conf.get("is_gemini_api", False)) else "openai",
             "api_key": api_key,
-            "base_url": str(self.conf.get("api_url", "") or "").strip(),
+            "base_url": api_url,
             "enabled": True,
             "models": models,
         }]
@@ -425,11 +435,32 @@ class FigurineProPlugin(Star):
     def _find_provider_for_model(self, name: str) -> Optional[Dict[str, Any]]:
         """在 self.providers 中查找包含指定模型的提供商（按模型名匹配，返回首个）。
 
-        找不到返回 None。注意：本方法不区分启用/禁用，由调用方（_call_api）判定并给出针对性错误。
+        找不到返回 None。注意：本方法不区分启用/禁用、不区分 base_url 是否为空，
+        由调用方（_call_api）判定并给出针对性错误。
         """
         if not name:
             return None
         for p in self.providers:
+            for m in (p.get("models") or []):
+                if isinstance(m, dict) and str(m.get("name", "") or "").strip() == name:
+                    return p
+        return None
+
+    def _find_usable_provider_for_model(self, name: str) -> Optional[Dict[str, Any]]:
+        """在 self.providers 中查找「包含该模型 且 可用」的提供商。
+
+        可用 = 启用（enabled 缺省视为 True）且 base_url 非空。
+        用于 _call_api 的兜底：当 _find_provider_for_model 命中一个 base_url 为空的
+        stub 提供商（旧迁移残留）时，优先改用真正可用的提供商，避免误报「未配置 BaseURL」。
+        找不到返回 None。
+        """
+        if not name:
+            return None
+        for p in self.providers:
+            if not p.get("enabled", True):
+                continue
+            if not str(p.get("base_url", "") or "").strip():
+                continue
             for m in (p.get("models") or []):
                 if isinstance(m, dict) and str(m.get("name", "") or "").strip() == name:
                     return p
@@ -1953,6 +1984,14 @@ class FigurineProPlugin(Star):
         provider = self._find_provider_for_model(model_name)
         if not provider:
             return f"❌ 模型 {model_name} 未关联任何提供商，请在 WebUI 提供商管理中配置", model_name
+        # 若命中的提供商 base_url 为空（旧迁移残留的 stub 提供商），优先改用真正可用的提供商
+        if not str(provider.get("base_url", "") or "").strip():
+            usable = self._find_usable_provider_for_model(model_name)
+            if usable:
+                old_name = str(provider.get("name", "") or provider.get("id", "未命名"))
+                provider = usable
+                logger.info(f"[NewImage] 提供商「{old_name}」无 BaseURL，已改用可用提供商 "
+                            f"「{provider.get('name', '') or provider.get('id', '未命名')}」")
         if not provider.get("enabled", True):
             provider_name_dis = str(provider.get("name", "") or provider.get("id", "未命名"))
             return f"❌ 模型 {model_name} 所属提供商「{provider_name_dis}」已停用，请在 WebUI 提供商管理中启用", model_name
