@@ -1,13 +1,17 @@
 import asyncio
 import base64
 import functools
+import io
 import json
 import random
 import re
 import time
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+from PIL import Image as PILImage
 
 from astrbot import logger
 from astrbot.api.event import filter, MessageChain
@@ -55,6 +59,33 @@ DISPLAY_PROMPT_LEN = 20           # 文生图/指令显示 prompt 预览长度
 DISPLAY_CMD_LEN = 30              # 预设指令显示预览长度
 API_TIMEOUT_MIN_SECONDS = 10      # API 超时下限
 LOG_IMAGE_MAX_BYTES = 20 * 1024 * 1024  # 日志图片大小上限（20MB），超过返回 413
+
+# ========== NovelAI（novalai）提供商路由常量 ==========
+NOVALAI_DEFAULT_BASE_URL = "https://image.novelai.net"
+NOVALAI_DEFAULT_NEGATIVE_PROMPT = ("nsfw, lowres, {bad}, error, fewer, extra, missing, worst quality, "
+                                   "jpeg artifacts, bad quality, watermark, unfinished, displeasing, "
+                                   "chromatic aberration, signature, extra digits, artistic error, "
+                                   "username, scan, [abstract]")
+# size 键（1K/2K/4K）→ 宽高映射（需 64 倍数，竖版 2:3 比例）
+NOVALAI_SIZE_DIMENSIONS = {
+    "1K": (832, 1216),
+    "2K": (1152, 1664),
+    "4K": (1664, 2432),
+}
+NOVALAI_DEFAULT_SIZE = "1K"
+NOVALAI_DEFAULT_WIDTH, NOVALAI_DEFAULT_HEIGHT = 832, 1216
+NOVALAI_DEFAULT_STEPS = 23          # 免费模式 steps 上限 28，付费可更大（保守用 23）
+NOVALAI_STEPS_MAX_FREE = 28         # 免费模式 steps 上限
+NOVALAI_MAX_PIXELS_FREE = 1048576   # 免费模式面积上限（px²）
+NOVALAI_MAX_PIXELS_PAID = 3145728   # 付费模式面积上限（px²）
+NOVALAI_MIN_DIM = 64                # 宽高最小单位（64 的倍数）
+NOVALAI_SAMPLERS = ("k_euler_ancestral", "k_dpmpp_2s_ancestral", "k_dpmpp_2m_sde",
+                    "k_euler", "k_dpmpp_2m", "k_dpmpp_sde")
+NOVALAI_DEFAULT_SAMPLER = "k_euler_ancestral"
+NOVALAI_IMG2IMG_STRENGTH = 0.7
+NOVALAI_IMG2IMG_NOISE = 0.2
+NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 
 def _choice_rank(key: str, value: str) -> float:
@@ -1853,10 +1884,13 @@ class FigurineProPlugin(Star):
                     logger.info(f"[NewImage] 模型 {model_name} 不支持分辨率 {effective_size}，"
                                 f"已自动调整为允许的最大分辨率 {max_avail}")
 
-        # ========== 按提供商 type 选择路由（novalai 暂按 openai 兼容路由处理） ==========
+        # ========== 按提供商 type 选择路由 ==========
         if provider_type == "gemini":
             return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                image_size, source_info, final_params), model_name
+        elif provider_type == "novalai":
+            return await self._call_novalai_api(api_url, api_key, model_name, image_bytes_list, prompt,
+                                                image_size, source_info, final_params), model_name
         else:
             return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                source_info, final_params), model_name
@@ -2145,6 +2179,189 @@ class FigurineProPlugin(Star):
             return "请求超时"
         except Exception as e:
             logger.error(f"调用 API 时发生未知错误: {e}", exc_info=True)
+            return f"发生未知错误: {e}"
+
+    def _fit_novalai_dimensions(self, width: int, height: int) -> tuple:
+        """把宽高规整为 64 倍数（min 64），面积超付费上限时按比例缩放保持 64 对齐。
+
+        返回 (width, height)。面积上限取付费档（NOVALAI_MAX_PIXELS_PAID）作为 API 允许的绝对上限；
+        免费档用户若请求 2K/4K 超限，由 API 返回错误并被 _call_novalai_api 透出。
+        """
+        width = max(NOVALAI_MIN_DIM, round(width / NOVALAI_MIN_DIM) * NOVALAI_MIN_DIM)
+        height = max(NOVALAI_MIN_DIM, round(height / NOVALAI_MIN_DIM) * NOVALAI_MIN_DIM)
+        area = width * height
+        if area > NOVALAI_MAX_PIXELS_PAID:
+            scale = (NOVALAI_MAX_PIXELS_PAID / area) ** 0.5
+            width = max(NOVALAI_MIN_DIM, int(width * scale // NOVALAI_MIN_DIM) * NOVALAI_MIN_DIM)
+            height = max(NOVALAI_MIN_DIM, int(height * scale // NOVALAI_MIN_DIM) * NOVALAI_MIN_DIM)
+        return width, height
+
+    async def _call_novalai_api(self, api_url: str, api_key: str, model_name: str,
+                                image_bytes_list: List[bytes], prompt: str,
+                                image_size: Optional[str], source_info: str,
+                                gen_params: Optional[Dict] = None) -> bytes | str:
+        """NovelAI 独立路由（POST {base_url}/ai/generate-image）。
+
+        NovelAI 结构与 gemini/openai 完全不同：prompt 放在 v4_prompt.caption.base_caption，
+        负面词放 negative_prompt + v4_negative_prompt.caption.base_caption 两处；
+        图生图 action=img2img 并在 parameters 追加 strength/noise/image/extra_noise_seed，
+        width/height 覆盖为原图实际尺寸。响应为 ZIP（image_0.png）。
+
+        gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
+            size        → width/height（1K=832×1216、2K=1152×1664、4K=1664×2432，64 倍数）
+            steps       → parameters.steps（默认 23，免费档 clamp ≤28）
+            negative_prompt → 替换默认负面词模板（默认模板见 NOVALAI_DEFAULT_NEGATIVE_PROMPT）
+            sampler     → 非法值回退默认（PARAM_SCHEMA 无此键，仅当传入时生效）
+        返回 bytes=生图成功 / str=失败原因。
+        """
+        # ========== 尺寸映射 ==========
+        size_key = (gen_params or {}).get("size") or image_size or NOVALAI_DEFAULT_SIZE
+        if size_key not in NOVALAI_SIZE_DIMENSIONS:
+            size_key = NOVALAI_DEFAULT_SIZE
+        width, height = NOVALAI_SIZE_DIMENSIONS[size_key]
+
+        # ========== steps（免费档 clamp ≤28，默认 23） ==========
+        try:
+            steps = int((gen_params or {}).get("steps", NOVALAI_DEFAULT_STEPS))
+        except (TypeError, ValueError):
+            steps = NOVALAI_DEFAULT_STEPS
+        steps = max(1, min(steps, NOVALAI_STEPS_MAX_FREE))
+
+        # ========== 负面词：默认模板作底，用户传入则替换 ==========
+        negative_prompt = NOVALAI_DEFAULT_NEGATIVE_PROMPT
+        user_neg = (gen_params or {}).get("negative_prompt")
+        if isinstance(user_neg, str) and user_neg.strip():
+            negative_prompt = user_neg.strip()
+
+        # ========== sampler（可选，非法回退默认） ==========
+        sampler = NOVALAI_DEFAULT_SAMPLER
+        user_sampler = (gen_params or {}).get("sampler")
+        if isinstance(user_sampler, str) and user_sampler.strip() in NOVALAI_SAMPLERS:
+            sampler = user_sampler.strip()
+
+        # ========== 判断图生图 ==========
+        img2img = bool(image_bytes_list)
+        parameters: Dict[str, Any] = {
+            "params_version": 3,
+            "width": width,
+            "height": height,
+            "scale": 6,
+            "sampler": sampler,
+            "steps": steps,
+            "n_samples": 1,
+            "ucPreset": 0,
+            "qualityToggle": True,
+            "dynamic_thresholding": False,
+            "controlnet_strength": 1,
+            "legacy": False,
+            "add_original_image": True,
+            "cfg_rescale": 0,
+            "noise_schedule": "karras",
+            "legacy_v3_extend": False,
+            "skip_cfg_above_sigma": None,
+            "use_coords": False,
+            "characterPrompts": [],
+            "v4_prompt": {
+                "caption": {"base_caption": prompt or "", "char_captions": []},
+                "use_coords": False,
+                "use_order": True,
+            },
+            "v4_negative_prompt": {
+                "caption": {"base_caption": negative_prompt, "char_captions": []},
+            },
+            "negative_prompt": negative_prompt,
+            "reference_image_multiple": [],
+            "reference_information_extracted_multiple": [],
+            "reference_strength_multiple": [],
+        }
+
+        if img2img:
+            # 图生图：action=img2img，覆盖宽高为原图实际尺寸，追加图生图字段
+            try:
+                with PILImage.open(io.BytesIO(image_bytes_list[0])) as pil_img:
+                    orig_w, orig_h = pil_img.size
+            except Exception as e:
+                logger.warning(f"[NewImage/NovelAI] 读取原图尺寸失败: {e}，使用目标尺寸 {width}x{height}")
+                orig_w, orig_h = width, height
+            width, height = self._fit_novalai_dimensions(orig_w, orig_h)
+            parameters["width"] = width
+            parameters["height"] = height
+            parameters["strength"] = NOVALAI_IMG2IMG_STRENGTH
+            parameters["noise"] = NOVALAI_IMG2IMG_NOISE
+            parameters["image"] = base64.b64encode(image_bytes_list[0]).decode("utf-8")
+            parameters["extra_noise_seed"] = random.randint(0, 2 ** 32 - 1)
+
+        request_body: Dict[str, Any] = {
+            "input": "",
+            "model": model_name,
+            "action": "img2img" if img2img else "generate",
+            "parameters": parameters,
+        }
+
+        # ========== 端点 & 请求头 ==========
+        base = api_url.rstrip("/")
+        endpoint = f"{base}/ai/generate-image"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Origin": "https://novelai.net",
+            "Referer": "https://novelai.net",
+            "User-Agent": NOVALAI_UA,
+        }
+
+        logger.info(f"[NewImage/NovelAI] 发送请求 [{source_info}]: Model={model_name}, "
+                    f"Action={'img2img' if img2img else 'generate'}, "
+                    f"Size={width}x{height}, Steps={steps}")
+
+        try:
+            if not self.iwf:
+                return "ImageWorkflow 未初始化"
+            async with self.iwf.session.post(
+                endpoint, json=request_body, headers=headers,
+                proxy=self.iwf.proxy, timeout=self.api_timeout,
+            ) as resp:
+                if resp.status != 200:
+                    raw = await resp.read()
+                    err_msg = f"NovelAI API请求失败 (HTTP {resp.status})"
+                    try:
+                        err_json = json.loads(raw.decode("utf-8", errors="replace"))
+                        detail = (err_json.get("message") or err_json.get("detail")
+                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                        err_msg = f"{err_msg}: {str(detail)[:300]}"
+                    except Exception:
+                        err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
+                    if resp.status >= 500:
+                        err_msg = f"⚠️ NovelAI 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
+                    logger.error(err_msg)
+                    return err_msg
+
+                data = await resp.read()
+
+                # ========== 解压 ZIP，取第一张图 ==========
+                try:
+                    zf = zipfile.ZipFile(io.BytesIO(data))
+                    names = zf.namelist()
+                    image_name = next((n for n in names
+                                       if n.endswith(".png") or n.endswith(".webp") or n.endswith(".jpg")), None)
+                    if image_name is None:
+                        return f"NovelAI 响应中没有找到图片文件（zip 内含: {names[:5]}）"
+                    return zf.read(image_name)
+                except zipfile.BadZipFile:
+                    # 非 zip（可能是错误 JSON / 空响应）
+                    body = data[:300].decode("utf-8", errors="replace")
+                    logger.error(f"NovelAI 响应不是合法 ZIP: {body}")
+                    try:
+                        err_json = json.loads(body)
+                        detail = (err_json.get("message") or err_json.get("detail")
+                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                        return f"NovelAI 返回错误: {str(detail)[:300]}"
+                    except Exception:
+                        return f"NovelAI 返回了无法解析的响应（非图片 ZIP）: {body[:200]}"
+        except asyncio.TimeoutError:
+            logger.error("NovelAI API 请求超时")
+            return "请求超时"
+        except Exception as e:
+            logger.error(f"调用 NovelAI API 时发生未知错误: {e}", exc_info=True)
             return f"发生未知错误: {e}"
 
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
