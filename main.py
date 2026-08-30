@@ -88,6 +88,28 @@ NOVALAI_IMG2IMG_NOISE = 0.2
 NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+# ========== 各提供商类型的默认模型模板（添加提供商时自动填充，可再编辑） ==========
+# novalai 列表来自反代 std.loliyc.com 的 /v1/models 实测（2026-08-30）
+PROVIDER_DEFAULT_MODELS: Dict[str, List[Dict[str, Any]]] = {
+    "gemini": [
+        {"name": "google/gemini-2.0-flash-exp:free", "quota": 1, "desc": "Gemini 默认模型", "params": {}, "allowed_sizes": None},
+    ],
+    "openai": [
+        {"name": "gpt-image-1", "quota": 1, "desc": "OpenAI 默认图像模型", "params": {}, "allowed_sizes": None},
+    ],
+    "novalai": [
+        {"name": "nai-diffusion-4-full", "quota": 1, "desc": "V4 全量（默认）", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-4-curated-preview", "quota": 1, "desc": "V4 精选预览", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-4-5-full", "quota": 1, "desc": "V4.5 全量", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-4-5-curated", "quota": 1, "desc": "V4.5 精选", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-5-full", "quota": 1, "desc": "V5 全量（最新）", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-5-curated", "quota": 1, "desc": "V5 精选（最新）", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-3", "quota": 1, "desc": "V3 标准", "params": {}, "allowed_sizes": None},
+        {"name": "nai-diffusion-furry-3", "quota": 1, "desc": "V3 Furry", "params": {}, "allowed_sizes": None},
+        {"name": "director", "quota": 1, "desc": "构图/导演模式", "params": {}, "allowed_sizes": None},
+    ],
+}
+
 
 def _choice_rank(key: str, value: str) -> float:
     """返回 choices 字符串参数的可比数值：size 用 _SIZE_RANK，其余尝试转 float；无法比较返回 -1。"""
@@ -2990,7 +3012,7 @@ class FigurineProPlugin(Star):
                 "base_url": base_url,
                 "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
                 "enabled": True,
-                "models": [],
+                "models": list(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
             }
             self.providers.append(provider)
             await self._save_providers()
