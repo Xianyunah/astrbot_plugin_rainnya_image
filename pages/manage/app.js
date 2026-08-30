@@ -77,7 +77,7 @@
   var PROVIDER_TEMPLATES = {
     gemini:  { base_url: "https://generativelanguage.googleapis.com" },
     openai:  { base_url: "https://api.openai.com/v1" },
-    novalai: { base_url: "https://api.novalai.io/v1" },
+    novalai: { base_url: "https://image.novelai.net" },
   };
   function typeMeta(t) { return TYPE_META[t] || { label: String(t || "?").toUpperCase(), cls: "" }; }
   function maskKey(k) {
