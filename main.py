@@ -2557,8 +2557,9 @@ class FigurineProPlugin(Star):
                     consumed_from = ""
                     if not self.is_global_admin(event):
                         consumed_from = await self._consume_quota(sender_id, group_id, count=quota)
+                    file_path = ""
                     try:
-                        await self._save_generation(group_id, sender_id, prompt, used_model, res)
+                        file_path = await self._save_generation(group_id, sender_id, prompt, used_model, res)
                     except Exception as e:
                         logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
                     # 剩余次数：优先显示个人剩余；若未开启用户限制则显示群剩余
@@ -2580,11 +2581,15 @@ class FigurineProPlugin(Star):
                                 await event.send(MessageChain(chain=[Plain(f"❌ 发送失败: {send_res}")]))
                         except Exception as e:
                             logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
+                    # 结果回传主 LLM：下一轮对话可看到图片路径并引用（NSFW ZIP 时指落盘的原始图路径）
+                    await self._notify_llm_result(event, f"📎 生图完成 | 模型: {used_model} | 图片路径: {file_path}")
                 else:
                     try:
                         await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
                     except Exception as e:
                         logger.error(f"[NewImage] 发送生图失败提示失败: {e}", exc_info=True)
+                    # 结果回传主 LLM：下一轮对话可看到失败原因
+                    await self._notify_llm_result(event, f"❌ 生图失败: {res}")
             finally:
                 if slot_acquired:
                     await self._release_group_slot(group_id)
@@ -2770,6 +2775,23 @@ class FigurineProPlugin(Star):
                 return f"预设 [{keyword}] 的提示词内容：\n{prompt}"
             presets = list(self.prompt_map.keys())
             return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
+
+    async def _notify_llm_result(self, event: AstrMessageEvent, text: str) -> None:
+        """后台生图完成后，把「结果文本」主动回传当前会话，供主 LLM 下一轮回应/引用。
+
+        通过 context.send_message(unified_msg_origin) 发送纯文字；平台不支持（如 qq_official）
+        或发送失败时仅 warning 降级，不抛异常、不影响生图主流程。该消息用户侧同样可见。
+        """
+        try:
+            umo = getattr(event, "unified_msg_origin", "") or ""
+            if not umo:
+                logger.warning("[NewImage] 无 unified_msg_origin，跳过 LLM 结果回传")
+                return
+            ok = await self.context.send_message(umo, MessageChain(chain=[Plain(text)]))
+            if not ok:
+                logger.warning("[NewImage] LLM 结果回传失败：未匹配到平台 (%s)", umo)
+        except Exception as e:
+            logger.warning(f"[NewImage] LLM 结果回传异常: {e}")
 
     def _effective_model_is_gemini(self, group_id: Optional[str] = None,
                                    model_override: Optional[str] = None) -> bool:
