@@ -39,6 +39,12 @@
         "type": "string",
         "default": "bnn"
     },
+    "selfie_prompt": {
+        "description": "【自拍】AI 自拍模式的人物外貌特征描述",
+        "type": "string",
+        "hint": "generate_image 工具传 selfie=true 时，自动在提示词前追加这段人物外貌特征（如：a cute catgirl with soft silver hair and blue eyes, gentle smile）。用英文更利于生图模型理解。",
+        "default": "a cute catgirl with soft silver hair and blue eyes, gentle smile, warm aura"
+    },
     "use_proxy": {
         "description": "是否启用网络代理",
         "type": "bool",

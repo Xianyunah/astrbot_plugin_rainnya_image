@@ -1029,6 +1029,8 @@
       el("cfgArtistRecEnabled").checked = !!c.artist_recommend_enabled;
       el("cfgArtistRecMax").value = c.artist_recommend_max_candidates != null ? c.artist_recommend_max_candidates : "";
       el("cfgArtistRecMin").value = c.artist_recommend_min_match != null ? c.artist_recommend_min_match : "";
+      /* 自拍特征 */
+      el("cfgSelfiePrompt").value = c.selfie_prompt || "";
       /* 权限 */
       el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
       el("cfgUserBlack").value = (c.user_blacklist || []).join("\n");
@@ -1100,6 +1102,8 @@
       artist_recommend_enabled: el("cfgArtistRecEnabled").checked,
       artist_recommend_max_candidates: parseInt(el("cfgArtistRecMax").value, 10) || 0,
       artist_recommend_min_match: parseInt(el("cfgArtistRecMin").value, 10) || 0,
+      /* 自拍特征 */
+      selfie_prompt: el("cfgSelfiePrompt").value,
       /* 权限 */
       user_whitelist: splitLines(el("cfgUserWhite").value),
       user_blacklist: splitLines(el("cfgUserBlack").value),

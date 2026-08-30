@@ -2110,7 +2110,7 @@ class FigurineProPlugin(Star):
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
         async def generate_image(self, event: AstrMessageEvent, prompt: str, model: str = "",
-                                 params: Optional[Dict] = None):
+                                 params: Optional[Dict] = None, selfie: bool = False):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
 
             注意：若用户在当前消息（或引用/刚发送的消息）中附带图片，本工具会自动提取该图片作为参考进行「图+文生图」；若纯文本描述则进行「文生图」。
@@ -2119,6 +2119,7 @@ class FigurineProPlugin(Star):
                 prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
                 model(string): 生图模型名（可留空，留空则用当前会话所在群的默认模型；若不确定可用模型请先调用 query_generation_models 工具查询）
                 params(object): 生图参数（可选，JSON对象，如 {"size":"4K","temperature":0.9}；可用键：size/temperature/max_tokens/steps/negative_prompt）
+                selfie(boolean): 自拍模式。为 true 时自动在提示词前追加自拍人物外貌特征（AI 画自己的自拍用），默认 false
             """
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
@@ -2145,6 +2146,11 @@ class FigurineProPlugin(Star):
                     except Exception as e:
                         logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                     return f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
+            # 自拍模式：在提示词前追加可配置的固定人物外貌特征（AI 画自己的自拍用，保证形象一致）
+            if selfie:
+                feature = str(self.conf.get("selfie_prompt", "") or "").strip()
+                if feature:
+                    prompt = f"{feature}, {prompt}"
             # 异步生图：立即返回给 LLM（不阻塞其回复），实际生成放后台任务，完成后自动发送到会话
             # 对 LLM 传入的 params 做温和清洗（夹取/丢弃），再传入后台任务
             cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
@@ -3448,6 +3454,7 @@ class FigurineProPlugin(Star):
         # 基础
         "prefix": bool,              # 是否要求指令必须带前缀
         "extra_prefix": str,         # 自定义提示词模式的前缀
+        "selfie_prompt": str,        # 自拍模式的人物外貌特征描述（generate_image selfie=true 时前置到提示词）
         "use_proxy": bool,           # 是否启用网络代理
         "proxy_url": str,            # 网络代理地址
         "download_timeout": int,     # 图片下载超时时间（秒）
@@ -4136,6 +4143,7 @@ class FigurineProPlugin(Star):
                 # 基础
                 "prefix": bool(self.conf.get("prefix", True)),
                 "extra_prefix": str(self.conf.get("extra_prefix", "bnn") or ""),
+                "selfie_prompt": str(self.conf.get("selfie_prompt", "") or ""),
                 "use_proxy": bool(self.conf.get("use_proxy", False)),
                 "proxy_url": str(self.conf.get("proxy_url", "") or ""),
                 "download_timeout": self.conf.get("download_timeout", 60),
