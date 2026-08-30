@@ -86,7 +86,7 @@ NOVALAI_DEFAULT_SAMPLER = "k_euler_ancestral"
 NOVALAI_IMG2IMG_STRENGTH = 0.7
 NOVALAI_IMG2IMG_NOISE = 0.2
 NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
 
 # ========== 各提供商类型的默认模型模板（添加提供商时自动填充，可再编辑） ==========
 # novalai 列表来自反代 std.loliyc.com 的 /v1/models 实测（2026-08-30）
@@ -2614,7 +2614,7 @@ class FigurineProPlugin(Star):
             parameters["extra_noise_seed"] = random.randint(0, 2 ** 32 - 1)
 
         request_body: Dict[str, Any] = {
-            "input": "",
+            "input": prompt or "",
             "model": model_name,
             "action": "img2img" if img2img else "generate",
             "parameters": parameters,
@@ -2629,6 +2629,7 @@ class FigurineProPlugin(Star):
             "Origin": "https://novelai.net",
             "Referer": "https://novelai.net",
             "User-Agent": NOVALAI_UA,
+            "authority": "api.novelai.net",
         }
 
         logger.info(f"[NewImage/NovelAI] 发送请求 [{source_info}]: Model={model_name}, "
