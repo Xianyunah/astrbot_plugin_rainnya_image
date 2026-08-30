@@ -802,6 +802,7 @@ html[data-theme="dark"] .type-novalai { --type-c: #a78bfa; --type-bg: rgba(167, 
   text-overflow: ellipsis;
 }
 .pm-item .pm-url { white-space: normal; word-break: break-all; }
+.pm-item .pm-key { white-space: normal; word-break: break-all; font-size: 11px; }
 
 .provider-card-foot {
   display: flex;

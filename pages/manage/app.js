@@ -63,7 +63,7 @@
   /* ============================================================
    * Tab 1 · 提供商管理
    * ============================================================ */
-  var providersData = [];    // [{id, name, type, api_key_masked, base_url, enabled, model_count}]
+  var providersData = [];    // [{id, name, type, api_key, api_key_masked, base_url, enabled, model_count}]
   var providerView = "list"; // "list" | "detail"
   var currentProviderId = null;
   var modelsData = []; // [{name, quota, desc, params:{}, allowed_sizes:null|[]}]
@@ -240,7 +240,7 @@
         (p.enabled ? " checked" : "") + ">" +
         "</div>" +
         '<div class="provider-meta">' +
-        '<span class="pm-item"><span class="pm-k">API Key</span><code>' + esc(p.api_key_masked || maskKey("")) + "</code></span>" +
+        '<span class="pm-item"><span class="pm-k">API Key</span><code class="pm-key">' + esc(p.api_key || "") + (p.api_key ? "" : "未设置") + "</code></span>" +
         '<span class="pm-item"><span class="pm-k">BaseURL</span><code class="pm-url">' + esc(p.base_url || "—") + "</code></span>" +
         "</div>" +
         '<div class="provider-card-foot">' +

@@ -2643,7 +2643,11 @@ class FigurineProPlugin(Star):
     # ---------- 多提供商管理 Web API ----------
 
     async def _web_providers_get(self):
-        """GET {base}/providers：返回提供商列表（API Key 掩码 + 模型数）。"""
+        """GET {base}/providers：返回提供商列表。
+
+        返回完整 api_key（WebUI 管理面板可查看/回填编辑框）+ api_key_masked（兼容旧前端）。
+        本端点经 _web_require_login 保护，仅 Dashboard 登录用户可访问，完整 key 不对外泄露。
+        """
         if (resp := self._web_require_login()):
             return resp
         try:
@@ -2653,6 +2657,7 @@ class FigurineProPlugin(Star):
                     "id": p.get("id", ""),
                     "name": p.get("name", ""),
                     "type": p.get("type", ""),
+                    "api_key": str(p.get("api_key", "") or ""),
                     "api_key_masked": self._mask_api_key(p.get("api_key", "")),
                     "base_url": p.get("base_url", ""),
                     "enabled": bool(p.get("enabled", True)),
