@@ -128,6 +128,10 @@
                 <span class="field-label">启用该提供商</span>
                 <input type="checkbox" id="pdEnabled" class="switch">
               </label>
+              <label class="field field-row" id="pdReverseProxyField">
+                <span class="field-label">启用反代模式（NovalAI）<i class="field-hint">开启后生图走 GET 反代格式（如 std.loliyc.com），关闭走官方协议</i></span>
+                <input type="checkbox" id="pdReverseProxy" class="switch">
+              </label>
             </div>
           </div>
 
@@ -562,6 +566,10 @@
         <label class="field field-row" id="provEnabledField" hidden>
           <span class="field-label">启用该提供商</span>
           <input type="checkbox" id="provEnabled" class="switch">
+        </label>
+        <label class="field field-row" id="provReverseProxyField" hidden>
+          <span class="field-label">启用反代模式（NovalAI）<i class="field-hint">开启后生图走 GET 反代格式，关闭走官方协议</i></span>
+          <input type="checkbox" id="provReverseProxy" class="switch">
         </label>
       </div>
       <div class="modal-foot">

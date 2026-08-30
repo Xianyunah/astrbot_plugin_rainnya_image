@@ -267,6 +267,13 @@
   }
 
   /* ---- 提供商详情视图 ---- */
+  /* 反代模式为 NovalAI 专属：按提供商类型/所选模板控制相关开关字段显隐 */
+  function syncReverseProxyField(type) {
+    var isNovalai = type === "novalai";
+    el("pdReverseProxyField").hidden = !isNovalai;
+    el("provReverseProxyField").hidden = !isNovalai;
+  }
+
   async function openProvider(id) {
     currentProviderId = id;
     var p = null;
@@ -282,6 +289,8 @@
     el("pdApiKey").value = ""; // 留空 = 不修改
     el("pdBaseUrl").value = p.base_url || "";
     el("pdEnabled").checked = !!p.enabled;
+    el("pdReverseProxy").checked = !!p.use_reverse_proxy;
+    syncReverseProxyField(p.type);
     showDetailView();
     await loadProviderModels(id);
   }
@@ -308,6 +317,7 @@
       await apiPost("providers/save", {
         id: currentProviderId, name: name, api_key: key, base_url: url,
         enabled: el("pdEnabled").checked,
+        use_reverse_proxy: el("pdReverseProxy").checked,
       });
       el("pdApiKey").value = ""; // 已提交，清空掩码输入
       el("pdTitle").textContent = name;
@@ -328,6 +338,7 @@
       await apiPost("providers/save", {
         id: p.id, name: p.name || "", api_key: "", base_url: p.base_url || "",
         enabled: next,
+        use_reverse_proxy: !!p.use_reverse_proxy,
       });
       toast("提供商「" + p.name + "」已" + (next ? "启用" : "停用"), "success");
     } catch (e) {
@@ -371,9 +382,11 @@
     el("provName").value = "";
     el("provKey").value = "";
     el("provUrl").value = "";
+    el("provReverseProxy").checked = false;
     el("provName").classList.remove("invalid");
     el("provKey").classList.remove("invalid");
     selectTemplate("gemini");
+    syncReverseProxyField(selectedTemplateType);
     openModal("providerModal");
     setTimeout(function () { el("provName").focus(); }, 30);
   }
@@ -393,6 +406,8 @@
     el("provKey").value = ""; // 留空 = 不修改
     el("provUrl").value = p.base_url || "";
     el("provEnabled").checked = !!p.enabled;
+    el("provReverseProxy").checked = !!p.use_reverse_proxy;
+    syncReverseProxyField(p.type);
     el("provName").classList.remove("invalid");
     el("provKey").classList.remove("invalid");
     openModal("providerModal");
@@ -409,6 +424,8 @@
     if (tpl && tpl.base_url) {
       el("provUrl").value = tpl.base_url;
     }
+    // 反代模式为 NovalAI 专属：随模板切换显隐
+    syncReverseProxyField(type);
   }
 
   async function saveProviderFromModal() {
@@ -427,11 +444,13 @@
         await apiPost("providers/save", {
           id: editProviderId, name: name, api_key: key, base_url: url,
           enabled: el("provEnabled").checked,
+          use_reverse_proxy: el("provReverseProxy").checked,
         });
         toast("提供商「" + name + "」已更新", "success");
       } else {
         await apiPost("providers", {
           name: name, type: selectedTemplateType, api_key: key, base_url: url,
+          use_reverse_proxy: el("provReverseProxy").checked,
         });
         toast("已添加提供商「" + name + "」", "success");
       }

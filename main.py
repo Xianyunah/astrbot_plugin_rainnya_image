@@ -390,6 +390,7 @@ class FigurineProPlugin(Star):
                     "desc": str(m.get("desc", "") or ""),
                     "params": dict(m.get("params") or {}),
                     "allowed_sizes": m.get("allowed_sizes"),
+                    "use_reverse_proxy": bool(p.get("use_reverse_proxy", False)),
                 })
                 self.available_model_names.append(name)
 
@@ -2045,6 +2046,10 @@ class FigurineProPlugin(Star):
             return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                image_size, source_info, final_params), model_name
         elif provider_type == "novalai":
+            if provider.get("use_reverse_proxy"):
+                return await self._call_novalai_reverse_proxy_api(api_url, api_key, model_name, image_bytes_list,
+                                                                  prompt, image_size, source_info,
+                                                                  final_params), model_name
             return await self._call_novalai_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                 image_size, source_info, final_params), model_name
         else:
@@ -2528,6 +2533,160 @@ class FigurineProPlugin(Star):
             logger.error(f"调用 NovelAI API 时发生未知错误: {e}", exc_info=True)
             return f"发生未知错误: {e}"
 
+    async def _call_novalai_reverse_proxy_api(self, api_url: str, api_key: str, model_name: str,
+                                              image_bytes_list: List[bytes], prompt: str,
+                                              image_size: Optional[str], source_info: str,
+                                              gen_params: Optional[Dict] = None) -> bytes | str:
+        """NovelAI 反代模式路由（GET {base_url}/generate）。
+
+        适用场景：用户网络直连 NovelAI 官方不通，但走第三方反代（如 std.loliyc.com）可用。
+        全部参数走 query string（tag/model/token/artist/negative/sampler/steps/scale/cfg/
+        noise_schedule/nocache/size），响应可能是 JSON（含图片 URL，需再下载）或图片二进制（PNG）。
+
+        反代对图生图支持有限：image_bytes_list 非空时明确报错（本次仅支持文生图）。
+
+        gen_params: 合并后的生成参数（渠道默认 < 模型默认 < 显式），映射规则同官方路由：
+            size → width/height；steps → clamp ≤28；scale → CFG clamp 0-10；
+            negative_prompt → 负面词；sampler → 非法值回退默认。
+        返回 bytes=生图成功 / str=失败原因。
+        """
+        # ========== 尺寸映射（与官方路由一致） ==========
+        size_key = (gen_params or {}).get("size") or image_size or NOVALAI_DEFAULT_SIZE
+        if size_key not in NOVALAI_SIZE_DIMENSIONS:
+            size_key = NOVALAI_DEFAULT_SIZE
+        width, height = NOVALAI_SIZE_DIMENSIONS[size_key]
+
+        # ========== steps（免费档 clamp ≤28，默认 23） ==========
+        try:
+            steps = int((gen_params or {}).get("steps", NOVALAI_DEFAULT_STEPS))
+        except (TypeError, ValueError):
+            steps = NOVALAI_DEFAULT_STEPS
+        steps = max(1, min(steps, NOVALAI_STEPS_MAX_FREE))
+
+        # ========== scale（CFG，clamp 0-10，默认 6.0） ==========
+        try:
+            scale = float((gen_params or {}).get("scale", 6.0))
+        except (TypeError, ValueError):
+            scale = 6.0
+        scale = max(0.0, min(scale, 10.0))
+
+        # ========== 负面词：默认模板作底，用户传入则替换 ==========
+        negative_prompt = NOVALAI_DEFAULT_NEGATIVE_PROMPT
+        user_neg = (gen_params or {}).get("negative_prompt")
+        if isinstance(user_neg, str) and user_neg.strip():
+            negative_prompt = user_neg.strip()
+
+        # ========== sampler（可选，非法回退默认） ==========
+        sampler = NOVALAI_DEFAULT_SAMPLER
+        user_sampler = (gen_params or {}).get("sampler")
+        if isinstance(user_sampler, str) and user_sampler.strip() in NOVALAI_SAMPLERS:
+            sampler = user_sampler.strip()
+
+        # ========== 图生图：反代模式暂不支持，明确报错 ==========
+        if image_bytes_list:
+            return "❌ NovelAI 反代模式暂不支持图生图，请仅使用文生图或关闭反代模式"
+
+        # ========== 构造 GET query params ==========
+        # token 去 "bearer " 前缀（兼容用户粘贴了完整 Authorization 头）
+        token = api_key.strip()
+        if token.lower().startswith("bearer "):
+            token = token[len("bearer "):].strip()
+        params: Dict[str, str] = {
+            "tag": prompt or "",
+            "model": model_name,
+            "token": token,
+            "artist": "",
+            "negative": negative_prompt,
+            "sampler": sampler,
+            "steps": str(steps),
+            "scale": str(scale),
+            "cfg": "",
+            "noise_schedule": "karras",
+            "nocache": "",
+            "size": f"{width}x{height}",
+        }
+
+        # ========== 端点 & 发送 ==========
+        base = api_url.rstrip("/")
+        endpoint = f"{base}/generate"
+        logger.info(f"[NewImage/NovelAI-反代] 发送请求 [{source_info}]: Model={model_name}, "
+                    f"Size={width}x{height}, Steps={steps}, Sampler={sampler}")
+
+        try:
+            if not self.iwf:
+                return "ImageWorkflow 未初始化"
+            async with self.iwf.session.get(
+                endpoint, params=params,
+                ssl=False,  # 反代常为自签/无证书，跳过 TLS 校验
+                proxy=self.iwf.proxy, timeout=self.api_timeout,
+            ) as resp:
+                if resp.status != 200:
+                    raw = await resp.read()
+                    err_msg = f"NovelAI 反代请求失败 (HTTP {resp.status})"
+                    try:
+                        err_json = json.loads(raw.decode("utf-8", errors="replace"))
+                        detail = (err_json.get("message") or err_json.get("detail")
+                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                        err_msg = f"{err_msg}: {str(detail)[:300]}"
+                    except Exception:
+                        err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
+                    if resp.status >= 500:
+                        err_msg = f"⚠️ NovelAI 反代服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
+                    logger.error(err_msg)
+                    return err_msg
+
+                content_type = resp.headers.get("Content-Type", "")
+                data = await resp.read()
+
+                # ========== JSON 响应：取图片 URL / data 再下载 ==========
+                if "json" in content_type.lower():
+                    try:
+                        payload = json.loads(data.decode("utf-8", errors="replace"))
+                    except Exception:
+                        return f"NovelAI 反代返回了无法解析的 JSON: {data[:200].decode('utf-8', errors='replace')}"
+                    # 依次取 url/image_url/image/data 第一个非空字段
+                    img_ref = None
+                    if isinstance(payload, dict):
+                        for k in ("url", "image_url", "image", "data"):
+                            v = payload.get(k)
+                            if v:
+                                img_ref = v
+                                break
+                    if not img_ref:
+                        return f"NovelAI 反代响应中未找到图片（JSON: {str(payload)[:300]}）"
+                    img_url = str(img_ref)
+                    if img_url.startswith("data:"):  # data URL（base64）
+                        try:
+                            b64_part = img_url.split(",", 1)[1]
+                            return base64.b64decode(b64_part)
+                        except Exception as e:
+                            logger.error(f"[NewImage/NovelAI-反代] data URL 解码失败: {e}", exc_info=True)
+                            return f"NovelAI 反代图片 data URL 解码失败: {e}"
+                    # http(s) URL → 再下载
+                    try:
+                        async with self.iwf.session.get(img_url, ssl=False,
+                                                        proxy=self.iwf.proxy,
+                                                        timeout=self.api_timeout) as img_resp:
+                            if img_resp.status != 200:
+                                return f"NovelAI 反代图片下载失败 (HTTP {img_resp.status})"
+                            return await img_resp.read()
+                    except asyncio.TimeoutError:
+                        return "NovelAI 反代图片下载超时"
+                    except Exception as e:
+                        logger.error(f"[NewImage/NovelAI-反代] 下载图片失败: {e}", exc_info=True)
+                        return f"NovelAI 反代图片下载失败: {e}"
+
+                # ========== 非 JSON：响应体即图片二进制（PNG） ==========
+                if not data:
+                    return "NovelAI 反代返回了空响应"
+                return data
+        except asyncio.TimeoutError:
+            logger.error("NovelAI 反代请求超时")
+            return "请求超时"
+        except Exception as e:
+            logger.error(f"调用 NovelAI 反代 API 时发生未知错误: {e}", exc_info=True)
+            return f"发生未知错误: {e}"
+
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
     WEB_PLUGIN_NAME = "astrbot_plugin_rainnya_image"
     # POST /config 白名单字段（键名 = conf 键名；api_url/api_keys/is_gemini_api/model/provider_id 已迁移到提供商，不再暴露）
@@ -2646,6 +2805,7 @@ class FigurineProPlugin(Star):
         """GET {base}/providers：返回提供商列表。
 
         返回完整 api_key（WebUI 管理面板可查看/回填编辑框）+ api_key_masked（兼容旧前端）。
+        use_reverse_proxy：novalai 是否走反代模式（GET /generate）。
         本端点经 _web_require_login 保护，仅 Dashboard 登录用户可访问，完整 key 不对外泄露。
         """
         if (resp := self._web_require_login()):
@@ -2660,6 +2820,7 @@ class FigurineProPlugin(Star):
                     "api_key": str(p.get("api_key", "") or ""),
                     "api_key_masked": self._mask_api_key(p.get("api_key", "")),
                     "base_url": p.get("base_url", ""),
+                    "use_reverse_proxy": bool(p.get("use_reverse_proxy", False)),
                     "enabled": bool(p.get("enabled", True)),
                     "model_count": len(p.get("models") or []),
                 })
@@ -2668,7 +2829,7 @@ class FigurineProPlugin(Star):
             return error_response(str(e))
 
     async def _web_providers_post(self):
-        """POST {base}/providers：新增提供商。body {name,type,api_key,base_url}。"""
+        """POST {base}/providers：新增提供商。body {name,type,api_key,base_url,use_reverse_proxy?}。"""
         if (resp := self._web_require_login()):
             return resp
         try:
@@ -2693,6 +2854,7 @@ class FigurineProPlugin(Star):
                 "type": ptype,
                 "api_key": api_key,
                 "base_url": base_url,
+                "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
                 "enabled": True,
                 "models": [],
             }
@@ -2725,9 +2887,9 @@ class FigurineProPlugin(Star):
             return error_response(str(e))
 
     async def _web_providers_save(self):
-        """POST {base}/providers/save：更新提供商配置。body {id,name,api_key,base_url,enabled}。
+        """POST {base}/providers/save：更新提供商配置。body {id,name,api_key,base_url,use_reverse_proxy,enabled}。
 
-        api_key 传空串表示不修改（保留原值）；name/base_url/enabled 可选。
+        api_key 传空串表示不修改（保留原值）；name/base_url/enabled/use_reverse_proxy 可选。
         """
         if (resp := self._web_require_login()):
             return resp
@@ -2760,6 +2922,8 @@ class FigurineProPlugin(Star):
                 api_key = str(payload.get("api_key", "") or "").strip()
                 if api_key:  # 传空串表示不修改，保留原值
                     target["api_key"] = api_key
+            if "use_reverse_proxy" in payload:
+                target["use_reverse_proxy"] = bool(payload.get("use_reverse_proxy"))
             if "enabled" in payload:
                 target["enabled"] = bool(payload.get("enabled"))
             await self._save_providers()
