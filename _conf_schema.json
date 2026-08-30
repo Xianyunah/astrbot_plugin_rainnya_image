@@ -91,7 +91,10 @@
         "description": "【Gemini】高分辨率白名单",
         "type": "list",
         "hint": "Gemini 模式下生效。只有在此列表中的用户，在指令中输入 2K/4K 时才会自动转为分辨率参数。不在列表中的用户输入 2K/4K 将作为普通文本传入 prompt。留空则所有用户都不允许通过指令指定分辨率。",
-        "items": { "type": "string", "description": "用户QQ号" },
+        "items": {
+            "type": "string",
+            "description": "用户QQ号"
+        },
         "default": []
     },
     "openai_size": {
@@ -146,28 +149,40 @@
         "description": "【权限】用户白名单",
         "type": "list",
         "hint": "留空则对所有用户开放。填写后，只有在此列表中的用户才能使用本插件功能（管理员除外）。",
-        "items": { "type": "string", "description": "用户QQ号" },
+        "items": {
+            "type": "string",
+            "description": "用户QQ号"
+        },
         "default": []
     },
     "user_blacklist": {
         "description": "【权限】用户黑名单",
         "type": "list",
         "hint": "黑名单优先级最高。在此列表中的用户将无法使用本插件功能（管理员除外）。",
-        "items": { "type": "string", "description": "用户QQ号" },
+        "items": {
+            "type": "string",
+            "description": "用户QQ号"
+        },
         "default": []
     },
     "group_whitelist": {
         "description": "【权限】群聊白名单",
         "type": "list",
         "hint": "留空则在所有群聊中可用。填写后，只有在此列表中的群聊才能使用本插件功能。",
-        "items": { "type": "string", "description": "群号" },
+        "items": {
+            "type": "string",
+            "description": "群号"
+        },
         "default": []
     },
     "group_blacklist": {
         "description": "【权限】群聊黑名单",
         "type": "list",
         "hint": "黑名单优先级最高。在此列表中的群聊将无法使用本插件功能。",
-        "items": { "type": "string", "description": "群号" },
+        "items": {
+            "type": "string",
+            "description": "群号"
+        },
         "default": []
     },
     "enable_user_limit": {
@@ -278,5 +293,93 @@
             "半真人:Take the image of the woman in [Input Photo]. Apply a creative split-style effect. Keep the lower half of her body (legs and boots) as the original photograph. Transform the upper half of her body (torso, arms, head) into a vibrant, 2D anime style with bold outlines and flat colors, similar to the anime 'Cyberpunk: Edgerunners'. The transition between the two styles should be a clean, slightly curved line.",
             "半融合:A striking, high-definition frontal portrait of the character from the input photo, with the face perfectly centered. The image blends two styles seamlessly: the left half retains the character's original realistic appearance, including detailed skin textures, natural lighting, and exact facial features from the input image, while the right half transitions into a vibrant manga-style version, featuring bold outlines, expressive eyes, and stylized features typical of high-quality anime art, while preserving recognizable traits (e.g., hair shape, facial structure). The transition between the realistic and manga halves is smooth and gradual, with no visible dividing line, ensuring a natural, cohesive fusion at the center of the face. The blending emphasizes the contrast between realistic and manga aesthetics while maintaining a unified appearance. The background is a neutral, solid color (e.g., soft gray or white) to highlight the fusion effect, with consistent lighting to enhance the artistic impact and no harsh separation."
         ]
+    },
+    "tagger_provider_id": {
+        "description": "【打标】打标专用 LLM 提供商 ID（可空）",
+        "type": "string",
+        "hint": "图片反推打标使用的 LLM provider ID。留空则使用当前会话的聊天 provider。格式如 'sources/配置名/模型名'，可在 AstrBot 提供商管理中查看。",
+        "default": ""
+    },
+    "tagger_temperature": {
+        "description": "【打标】打标 temperature",
+        "type": "float",
+        "hint": "打标时 LLM 采样温度（0-2）。打标偏确定性任务，建议保持较低值。",
+        "default": 0.2
+    },
+    "tagger_max_tokens": {
+        "description": "【打标】打标 max_tokens",
+        "type": "int",
+        "hint": "打标时 LLM 最大输出 token 数。标签多时建议 >=900。",
+        "default": 900
+    },
+    "artist_recommend_enabled": {
+        "description": "【画师推荐】是否启用画师推荐指令",
+        "type": "bool",
+        "hint": "开启后可使用 >>画师推荐 <需求> 从本地预设库组合画师串。",
+        "default": false
+    },
+    "artist_recommend_max_candidates": {
+        "description": "【画师推荐】候选画师池上限",
+        "type": "int",
+        "hint": "从预设库中最多取多少个匹配预设作为候选池。",
+        "default": 10
+    },
+    "artist_recommend_min_match": {
+        "description": "【画师推荐】最低匹配数",
+        "type": "int",
+        "hint": "匹配到的预设数低于此值则提示库中无匹配画师，需先在 WebUI 画师串管理添加。",
+        "default": 3
+    },
+    "novai_precheck_enabled": {
+        "description": "【NovelAI】是否启用 token 预检",
+        "type": "bool",
+        "hint": "启动时对启用的 novalai 提供商后台预检 token（GET /user/data），软校验只打日志不拦截生图。",
+        "default": true
+    },
+    "novai_precheck_timeout": {
+        "description": "【NovelAI】token 预检超时（秒）",
+        "type": "int",
+        "hint": "预检请求超时时间，默认 10 秒。",
+        "default": 10
+    },
+    "novai_point_warn_threshold": {
+        "description": "【NovelAI】训练步数告警阈值",
+        "type": "int",
+        "hint": "剩余训练步数低于或等于该值时打告警日志。",
+        "default": 10
+    },
+    "auto_recall_enabled": {
+        "description": "【自动撤回】是否启用生图结果自动撤回",
+        "type": "bool",
+        "hint": "开启后，生图结果图片将在延迟后自动撤回（仅 aiocqhttp 平台生效；event.send 拿不到 message_id，需用 OneBot 直发）。",
+        "default": false
+    },
+    "auto_recall_delay": {
+        "description": "【自动撤回】撤回延迟（秒）",
+        "type": "int",
+        "hint": "发送生图结果后多少秒撤回，默认 5 秒。",
+        "default": 5
+    },
+    "auto_recall_allowed_groups": {
+        "description": "【自动撤回】允许撤回的群/会话白名单",
+        "type": "list",
+        "hint": "格式为 '平台:会话ID'（如 aiocqhttp:123456789）。留空则不限制（所有 aiocqhttp 会话均生效）。",
+        "items": {
+            "type": "string",
+            "description": "平台:会话ID"
+        },
+        "default": []
+    },
+    "nsfw_filter_enabled": {
+        "description": "【NSFW 过滤】是否启用 NSFW 标签过滤",
+        "type": "bool",
+        "hint": "开启后，在所有生成请求的负面词最前自动前置过滤标签（对 Gemini/NovalAI 官方/反代统一生效）。",
+        "default": false
+    },
+    "nsfw_filter_tags": {
+        "description": "【NSFW 过滤】过滤标签",
+        "type": "string",
+        "hint": "前置到负面词开头的过滤标签，默认 {{{{nsfw}}}}。留空使用默认值。",
+        "default": ""
     }
 }

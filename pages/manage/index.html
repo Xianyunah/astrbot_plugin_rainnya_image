@@ -128,6 +128,10 @@
                 <span class="field-label">BaseURL</span>
                 <input type="text" id="pdBaseUrl" class="input" placeholder="https://api.example.com">
               </label>
+              <label class="field">
+                <span class="field-label">User URL（可选）<i class="field-hint">NovelAI key 预检用的账户端点，留空用 BaseURL / 官方 api.novelai.net</i></span>
+                <input type="text" id="pdUserUrl" class="input" placeholder="https://api.novelai.net">
+              </label>
               <label class="field field-row">
                 <span class="field-label">启用该提供商</span>
                 <input type="checkbox" id="pdEnabled" class="switch">
@@ -366,6 +370,122 @@
                 <label class="field">
                   <span class="field-label">负面提示词（每行一个）</span>
                   <textarea id="cfgNovalaiNeg" class="input" rows="3" placeholder="负面词，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <!-- NovelAI 预检 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">NovelAI 预检</h3>
+                  <p class="card-desc">生图前对 NovelAI key 做预检：余额/可用性检查与超时控制。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field field-row">
+                  <span class="field-label">启用预检</span>
+                  <input type="checkbox" id="cfgNovaiPrecheck" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">预检超时（秒）</span>
+                  <input type="number" id="cfgNovaiPrecheckTimeout" class="input" min="1">
+                </label>
+                <label class="field">
+                  <span class="field-label">点数不足提醒阈值</span>
+                  <input type="number" id="cfgNovaiWarn" class="input" min="0">
+                </label>
+              </div>
+            </div>
+
+            <!-- 自动撤回 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">自动撤回</h3>
+                  <p class="card-desc">生成完成后自动撤回结果消息，指定群白名单生效。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field field-row">
+                  <span class="field-label">启用自动撤回</span>
+                  <input type="checkbox" id="cfgAutoRecall" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">撤回延迟（秒）</span>
+                  <input type="number" id="cfgAutoRecallDelay" class="input" min="0">
+                </label>
+                <label class="field" style="grid-column: 1 / -1;">
+                  <span class="field-label">生效群（每行一个 platform:chat_id）</span>
+                  <textarea id="cfgAutoRecallGroups" class="input" rows="3" placeholder="qq:123456&#10;qq_group:789"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <!-- NSFW 过滤 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">NSFW 过滤</h3>
+                  <p class="card-desc">检测到 NSFW 内容时的标签注入设置。</p>
+                </div>
+              </div>
+              <div class="form">
+                <label class="field field-row">
+                  <span class="field-label">启用 NSFW 过滤</span>
+                  <input type="checkbox" id="cfgNsfwFilter" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">NSFW 标签</span>
+                  <input type="text" id="cfgNsfwTags" class="input" placeholder="{{{{{nsfw}}}}}">
+                </label>
+              </div>
+            </div>
+
+            <!-- 打标 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">打标</h3>
+                  <p class="card-desc">图片反推标签使用的打标模型与参数。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field">
+                  <span class="field-label">打标提供商 ID</span>
+                  <input type="text" id="cfgTaggerProvider" class="input" placeholder="模型/提供商 ID">
+                </label>
+                <label class="field">
+                  <span class="field-label">温度（0-2，步进0.1）</span>
+                  <input type="number" id="cfgTaggerTemp" class="input" min="0" max="2" step="0.1">
+                </label>
+                <label class="field">
+                  <span class="field-label">Max Tokens</span>
+                  <input type="number" id="cfgTaggerMaxTokens" class="input" min="1">
+                </label>
+              </div>
+            </div>
+
+            <!-- 画师推荐 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">画师推荐</h3>
+                  <p class="card-desc">根据标签自动推荐画师串的候选数量与匹配阈值。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field field-row">
+                  <span class="field-label">启用画师推荐</span>
+                  <input type="checkbox" id="cfgArtistRecEnabled" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">最大候选数</span>
+                  <input type="number" id="cfgArtistRecMax" class="input" min="1">
+                </label>
+                <label class="field">
+                  <span class="field-label">最少匹配标签数</span>
+                  <input type="number" id="cfgArtistRecMin" class="input" min="1">
                 </label>
               </div>
             </div>
@@ -666,6 +786,10 @@
         <label class="field">
           <span class="field-label">BaseURL</span>
           <input type="text" id="provUrl" class="input" placeholder="https://api.example.com">
+        </label>
+        <label class="field" id="provUserUrlField" hidden>
+          <span class="field-label">User URL（可选）<i class="field-hint">NovelAI key 预检账户端点，留空用 BaseURL</i></span>
+          <input type="text" id="provUserUrl" class="input" placeholder="https://api.novelai.net">
         </label>
         <label class="field field-row" id="provEnabledField" hidden>
           <span class="field-label">启用该提供商</span>

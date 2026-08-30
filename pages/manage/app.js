@@ -285,11 +285,12 @@
   }
 
   /* ---- 提供商详情视图 ---- */
-  /* 反代模式为 NovalAI 专属：按提供商类型/所选模板控制相关开关字段显隐 */
+  /* 反代/UserURL 为 NovalAI 专属：按提供商类型/所选模板控制相关字段显隐 */
   function syncReverseProxyField(type) {
     var isNovalai = type === "novalai";
     el("pdReverseProxyField").hidden = !isNovalai;
     el("provReverseProxyField").hidden = !isNovalai;
+    el("provUserUrlField").hidden = !isNovalai;
   }
 
   async function openProvider(id) {
@@ -306,6 +307,7 @@
     el("pdName").value = p.name || "";
     el("pdApiKey").value = ""; // 留空 = 不修改
     el("pdBaseUrl").value = p.base_url || "";
+    el("pdUserUrl").value = p.user_url || "";
     el("pdEnabled").checked = !!p.enabled;
     el("pdReverseProxy").checked = !!p.use_reverse_proxy;
     syncReverseProxyField(p.type);
@@ -329,11 +331,13 @@
     }
     var key = el("pdApiKey").value.trim();
     var url = el("pdBaseUrl").value.trim();
+    var userUrl = el("pdUserUrl").value.trim();
     var btn = el("btnProviderCfgSave");
     btn.disabled = true;
     try {
       await apiPost("providers/save", {
         id: currentProviderId, name: name, api_key: key, base_url: url,
+        user_url: userUrl,
         enabled: el("pdEnabled").checked,
         use_reverse_proxy: el("pdReverseProxy").checked,
       });
@@ -355,6 +359,7 @@
     try {
       await apiPost("providers/save", {
         id: p.id, name: p.name || "", api_key: "", base_url: p.base_url || "",
+        user_url: p.user_url || "",
         enabled: next,
         use_reverse_proxy: !!p.use_reverse_proxy,
       });
@@ -400,6 +405,7 @@
     el("provName").value = "";
     el("provKey").value = "";
     el("provUrl").value = "";
+    el("provUserUrl").value = "";
     el("provReverseProxy").checked = false;
     el("provName").classList.remove("invalid");
     el("provKey").classList.remove("invalid");
@@ -423,6 +429,7 @@
     el("provName").value = p.name || "";
     el("provKey").value = ""; // 留空 = 不修改
     el("provUrl").value = p.base_url || "";
+    el("provUserUrl").value = p.user_url || "";
     el("provEnabled").checked = !!p.enabled;
     el("provReverseProxy").checked = !!p.use_reverse_proxy;
     syncReverseProxyField(p.type);
@@ -455,12 +462,14 @@
     }
     var key = el("provKey").value.trim();
     var url = el("provUrl").value.trim();
+    var userUrl = el("provUserUrl").value.trim();
     var btn = el("providerSave");
     btn.disabled = true;
     try {
       if (providerModalMode === "edit") {
         await apiPost("providers/save", {
           id: editProviderId, name: name, api_key: key, base_url: url,
+          user_url: userUrl,
           enabled: el("provEnabled").checked,
           use_reverse_proxy: el("provReverseProxy").checked,
         });
@@ -468,6 +477,7 @@
       } else {
         await apiPost("providers", {
           name: name, type: selectedTemplateType, api_key: key, base_url: url,
+          user_url: userUrl,
           use_reverse_proxy: el("provReverseProxy").checked,
         });
         toast("已添加提供商「" + name + "」", "success");
@@ -1000,6 +1010,25 @@
       el("cfgNovalaiSteps").value = c.novalai_steps != null ? c.novalai_steps : "";
       el("cfgNovalaiScale").value = c.novalai_scale != null ? c.novalai_scale : "";
       el("cfgNovalaiNeg").value = c.novalai_negative_prompt || "";
+      /* NovelAI 预检 */
+      el("cfgNovaiPrecheck").checked = !!c.novai_precheck_enabled;
+      el("cfgNovaiPrecheckTimeout").value = c.novai_precheck_timeout != null ? c.novai_precheck_timeout : 10;
+      el("cfgNovaiWarn").value = c.novai_point_warn_threshold != null ? c.novai_point_warn_threshold : 10;
+      /* 自动撤回 */
+      el("cfgAutoRecall").checked = !!c.auto_recall_enabled;
+      el("cfgAutoRecallDelay").value = c.auto_recall_delay != null ? c.auto_recall_delay : 5;
+      el("cfgAutoRecallGroups").value = (c.auto_recall_allowed_groups || []).join("\n");
+      /* NSFW 过滤 */
+      el("cfgNsfwFilter").checked = !!c.nsfw_filter_enabled;
+      el("cfgNsfwTags").value = c.nsfw_filter_tags || "";
+      /* 打标 */
+      el("cfgTaggerProvider").value = c.tagger_provider_id || "";
+      el("cfgTaggerTemp").value = c.tagger_temperature != null ? c.tagger_temperature : "";
+      el("cfgTaggerMaxTokens").value = c.tagger_max_tokens != null ? c.tagger_max_tokens : "";
+      /* 画师推荐 */
+      el("cfgArtistRecEnabled").checked = !!c.artist_recommend_enabled;
+      el("cfgArtistRecMax").value = c.artist_recommend_max_candidates != null ? c.artist_recommend_max_candidates : "";
+      el("cfgArtistRecMin").value = c.artist_recommend_min_match != null ? c.artist_recommend_min_match : "";
       /* 权限 */
       el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
       el("cfgUserBlack").value = (c.user_blacklist || []).join("\n");
@@ -1052,6 +1081,25 @@
       novalai_steps: parseInt(el("cfgNovalaiSteps").value, 10) || 23,
       novalai_scale: parseFloat(el("cfgNovalaiScale").value) || 6.0,
       novalai_negative_prompt: el("cfgNovalaiNeg").value,
+      /* NovelAI 预检 */
+      novai_precheck_enabled: el("cfgNovaiPrecheck").checked,
+      novai_precheck_timeout: parseInt(el("cfgNovaiPrecheckTimeout").value, 10) || 10,
+      novai_point_warn_threshold: parseInt(el("cfgNovaiWarn").value, 10) || 0,
+      /* 自动撤回 */
+      auto_recall_enabled: el("cfgAutoRecall").checked,
+      auto_recall_delay: parseInt(el("cfgAutoRecallDelay").value, 10) || 0,
+      auto_recall_allowed_groups: splitLines(el("cfgAutoRecallGroups").value),
+      /* NSFW 过滤 */
+      nsfw_filter_enabled: el("cfgNsfwFilter").checked,
+      nsfw_filter_tags: el("cfgNsfwTags").value,
+      /* 打标 */
+      tagger_provider_id: el("cfgTaggerProvider").value.trim(),
+      tagger_temperature: parseFloat(el("cfgTaggerTemp").value) || 0.2,
+      tagger_max_tokens: parseInt(el("cfgTaggerMaxTokens").value, 10) || 900,
+      /* 画师推荐 */
+      artist_recommend_enabled: el("cfgArtistRecEnabled").checked,
+      artist_recommend_max_candidates: parseInt(el("cfgArtistRecMax").value, 10) || 0,
+      artist_recommend_min_match: parseInt(el("cfgArtistRecMin").value, 10) || 0,
       /* 权限 */
       user_whitelist: splitLines(el("cfgUserWhite").value),
       user_blacklist: splitLines(el("cfgUserBlack").value),

@@ -88,6 +88,52 @@ NOVALAI_IMG2IMG_NOISE = 0.2
 NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
 
+# ========== 打标 / 画师推荐 LLM 模板（移植自 nai-brush） ==========
+TAGGER_PROMPT_TEMPLATE = """你是图片内容打标器（Danbooru / NovelAI tag 体系）。
+
+要求：
+- 只输出 JSON
+- 标签使用英文小写下划线
+- 必须包含 CHARACTER_TAG、WORK_TAG、TAG、BAD_TAG、PROMPT、NEGATIVE 六个字段
+- BAD_TAG 只放 negative prompt，不要写"与图片相反"的否定 tag
+- CHARACTER_TAG 最多 5 个，WORK_TAG 最多 5 个，TAG 最多 80 个，BAD_TAG 最多 40 个
+
+JSON 结构：
+{
+  "CHARACTER_TAG": ["..."],
+  "WORK_TAG": ["..."],
+  "TAG": ["..."],
+  "BAD_TAG": ["..."],
+  "PROMPT": "...",
+  "NEGATIVE": "..."
+}
+"""
+
+EXTRACT_TAGS_TEMPLATE = """你是 Danbooru 标签专家。根据用户的画风需求，提取用于搜索画师的英文标签。
+
+用户需求：<<USER_REQUEST>>
+
+规则：
+- 如果用户明确提到了具体画师名，直接输出 `@画师名`（Danbooru 格式，下划线连接）
+- 如果是风格特征，输出 2-4 个英文标签，用空格分隔
+- 不要解释
+"""
+
+ARTIST_FROM_POOL_TEMPLATE = """你是 NovelAI 画师串专家。只能使用下方候选池中的画师，不要编造。
+
+用户需求：<<USER_REQUEST>>
+模型版本：<<MODEL_VERSION>>
+
+候选画师池：
+<<CANDIDATE_ARTISTS>>
+
+规则：
+- 所有画师都必须带 `artist:` 前缀
+- 使用 5-10 个画师组合
+- 可使用 `1.2::artist:name::` 这类数值权重
+- 直接输出最终画师串，不要解释
+"""
+
 # ========== 各提供商类型的默认模型模板（添加提供商时自动填充，可再编辑） ==========
 # novalai 列表来自反代 std.loliyc.com 的 /v1/models 实测（2026-08-30）
 PROVIDER_DEFAULT_MODELS: Dict[str, List[Dict[str, Any]]] = {
@@ -245,6 +291,7 @@ class FigurineProPlugin(Star):
         self._bg_tasks: set = set()          # 后台生图任务引用集合（防 GC + terminate 时回收）
         self._log_page_msgid: Dict[Any, Any] = {}  # (会话, 发送者) -> {"msgid": 消息id, "page": 页码, "scope": 范围, "count": 条数}
         self.prompt_map: Dict[str, str] = {}
+        self._last_artist_recommendation: str = ""  # 最近一次画师推荐结果（供 画师串保存 落库）
         self.iwf: Optional[ImageWorkflow] = None
         self.group_task_counts: Dict[str, int] = {}
         self.queue_lock = asyncio.Lock()
@@ -323,6 +370,18 @@ class FigurineProPlugin(Star):
         await self._load_user_checkin_data()
         # 加载多提供商配置（providers.json）：构建 self.providers + 扁平化 available_models/available_model_names
         await self._load_providers()
+        # NovelAI token 预检：对启用 novalai 提供商后台预检（不 await，结果写 provider["_user_status"]）
+        if self.conf.get("novai_precheck_enabled", True):
+            for p in self.providers:
+                if p.get("type") == "novalai" and p.get("enabled", True):
+                    api_key_p = str(p.get("api_key", "") or "").strip()
+                    user_url_p = str(p.get("user_url", "") or "").strip() or str(p.get("base_url", "") or "").strip()
+                    if not api_key_p or not user_url_p:
+                        continue
+                    pname = str(p.get("name", "") or p.get("id", "未命名"))
+                    task = asyncio.create_task(self._run_novai_precheck(p, user_url_p, api_key_p, pname))
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
         if self.available_models:
             logger.info(f"NewImage: 已解析 {len(self.available_models)} 个可用模型（按每次消耗配额计次）")
             for m in self.available_models:
@@ -404,6 +463,9 @@ class FigurineProPlugin(Star):
                 continue  # 禁用的提供商不参与可用模型列表
             if not str(p.get("base_url", "") or "").strip():
                 continue  # base_url 为空的提供商不可用，其模型不进可用列表（避免被当作默认模型）
+            # user_url 缺省取 base_url；novalai 官方默认用 image.novelai.net
+            if not str(p.get("user_url", "") or "").strip():
+                p["user_url"] = str(p.get("base_url", "") or "").strip() or NOVALAI_DEFAULT_BASE_URL
             pid = str(p.get("id", ""))
             for m in (p.get("models") or []):
                 if not isinstance(m, dict):
@@ -913,7 +975,12 @@ class FigurineProPlugin(Star):
                         f"个人剩余: {self._get_user_count(sender_id)}")
                     if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
                         f"本群剩余: {self._get_group_count(group_id)}")
-                yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
+                caption = " | ".join(caption_parts)
+                send_res = await self._send_image_with_recall(event, res, caption)
+                if send_res == "USE_CHAIN_RESULT":
+                    yield event.chain_result([Image.fromBytes(res), Plain(caption)])
+                elif send_res:
+                    yield event.plain_result(f"❌ 发送失败: {send_res}")
             else:
                 yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
         finally:
@@ -995,7 +1062,12 @@ class FigurineProPlugin(Star):
                         f"个人剩余: {self._get_user_count(sender_id)}")
                     if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
                         f"本群剩余: {self._get_group_count(group_id)}")
-                yield event.chain_result([Image.fromBytes(res), Plain(" | ".join(caption_parts))])
+                caption = " | ".join(caption_parts)
+                send_res = await self._send_image_with_recall(event, res, caption)
+                if send_res == "USE_CHAIN_RESULT":
+                    yield event.chain_result([Image.fromBytes(res), Plain(caption)])
+                elif send_res:
+                    yield event.plain_result(f"❌ 发送失败: {send_res}")
             else:
                 yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
         finally:
@@ -1549,6 +1621,228 @@ class FigurineProPlugin(Star):
         logger.info(f"[NewImage] 群 {group_id} 的画师串已切换为: {target['name']}")
         yield event.plain_result(f"✅ 本群画师串已切换为: {target['name']}")
 
+    # ========== LLM 公共层（打标/画师推荐用） ==========
+
+    async def _llm_generate_text(self, event: AstrMessageEvent, prompt: str, *,
+                                  provider_id: str = "", temperature: float = 0.2,
+                                  max_tokens: int = 900,
+                                  image_bytes_list: Optional[List[bytes]] = None) -> Optional[str]:
+        """通用 LLM 文本生成（纯协程，无 yield）。
+
+        依赖 AstrBot context.llm_generate / get_current_chat_provider_id：
+            llm_generate(*, chat_provider_id, prompt, image_urls, temperature, max_tokens) -> LLMResponse
+            get_current_chat_provider_id(umo) -> provider_id
+        provider_id 空时实时取当前会话 provider（勿缓存）；image_bytes_list → base64 data URL 列表传 image_urls。
+        失败/无 provider 返回 None。
+        """
+        try:
+            if not provider_id:
+                provider_id = await self.context.get_current_chat_provider_id(umo=event.unified_msg_origin)
+            if not provider_id:
+                logger.warning("[NewImage] 获取当前会话 LLM provider 失败")
+                return None
+            image_urls: Optional[List[str]] = None
+            if image_bytes_list:
+                image_urls = []
+                for img_bytes in image_bytes_list:
+                    b64 = base64.b64encode(img_bytes).decode("utf-8")
+                    image_urls.append(f"data:image/png;base64,{b64}")
+            response = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+                image_urls=image_urls,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+            )
+            text = str(getattr(response, "completion_text", "") or "").strip()
+            return text or None
+        except Exception as e:
+            logger.error(f"[NewImage] LLM 生成失败: {e}", exc_info=True)
+            return None
+
+    @staticmethod
+    def _strip_code_fence(text: str) -> str:
+        """剥 code fence（```json ... ``` 等）。"""
+        stripped = (text or "").strip()
+        if not (stripped.startswith("```") and stripped.endswith("```")):
+            return stripped
+        inner = stripped[3:-3].strip()
+        if "\n" not in inner:
+            return inner.strip()
+        first_line, rest = inner.split("\n", 1)
+        if first_line.strip().isalpha() and len(first_line.strip()) < 15:
+            return rest.strip()
+        return inner.strip()
+
+    @staticmethod
+    def _parse_json_object(text: str) -> Optional[Dict]:
+        """从 LLM 文本提取 JSON 对象（剥 code fence，截取首尾大括号后解析）。"""
+        cleaned = FigurineProPlugin._strip_code_fence(text).strip()
+        if not cleaned:
+            return None
+        candidates = [cleaned]
+        if '"' in cleaned and "{" in cleaned and "}" in cleaned:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidates.append(cleaned[start:end + 1])
+        for cand in candidates:
+            try:
+                payload = json.loads(cand)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    @staticmethod
+    def _normalize_tag_output(payload: Optional[Dict]) -> Optional[Dict]:
+        """从打标 JSON 归一化为六字段输出（缺省字段补空，字段类型强制 list/str）。"""
+        if not isinstance(payload, dict):
+            return None
+
+        def _tag_list(value) -> List[str]:
+            if isinstance(value, str):
+                return [v.strip() for v in value.split(",") if v.strip()]
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if str(v).strip()]
+            return []
+
+        return {
+            "CHARACTER_TAG": _tag_list(payload.get("CHARACTER_TAG")),
+            "WORK_TAG": _tag_list(payload.get("WORK_TAG")),
+            "TAG": _tag_list(payload.get("TAG")),
+            "BAD_TAG": _tag_list(payload.get("BAD_TAG")),
+            "PROMPT": str(payload.get("PROMPT", "") or "").strip(),
+            "NEGATIVE": str(payload.get("NEGATIVE", "") or "").strip(),
+        }
+
+    @staticmethod
+    def _format_tag_output(normalized: Dict) -> str:
+        """打标结果格式化：角色/作品/标签去重后逗号拼接，附 PROMPT 与负面词提示。"""
+        char_tags = list(dict.fromkeys(normalized.get("CHARACTER_TAG", [])))
+        work_tags = list(dict.fromkeys(normalized.get("WORK_TAG", [])))
+        tags = list(dict.fromkeys(normalized.get("TAG", [])))
+        bad_tags = list(dict.fromkeys(normalized.get("BAD_TAG", [])))
+        prompt = normalized.get("PROMPT", "")
+        negative = normalized.get("NEGATIVE", "")
+        lines = []
+        if char_tags:
+            lines.append(f"角色: {', '.join(char_tags)}")
+        if work_tags:
+            lines.append(f"作品: {', '.join(work_tags)}")
+        if tags:
+            lines.append(f"标签: {', '.join(tags)}")
+        if bad_tags:
+            lines.append(f"负面: {', '.join(bad_tags)}")
+        out = "\n".join(lines) if lines else ""
+        if prompt:
+            out += f"\n\nPrompt: {prompt}"
+        if negative:
+            out += f"\nNegative: {negative}"
+        out += "\n\n📌 打标结果可直接用于 `bnn <标签>` 生图"
+        return out.strip()
+
+    @filter.command("打标", prefix_optional=True)
+    async def on_tag_image(self, event: AstrMessageEvent):
+        """图片反推打标：引用/附带一张图片，LLM 输出六字段标签 JSON。"""
+        img_bytes_list = await self._extract_event_images(event)
+        if not img_bytes_list:
+            yield event.plain_result("📝 请引用回复或附带一张图片，例如 `>>打标` + 回复图片")
+            return
+        provider_id = str(self.conf.get("tagger_provider_id", "") or "").strip()
+        temperature = float(self.conf.get("tagger_temperature", 0.2) or 0.2)
+        max_tokens = int(self.conf.get("tagger_max_tokens", 900) or 900)
+        raw = await self._llm_generate_text(event, TAGGER_PROMPT_TEMPLATE,
+                                            provider_id=provider_id,
+                                            temperature=temperature,
+                                            max_tokens=max_tokens,
+                                            image_bytes_list=img_bytes_list[:1])
+        if not raw:
+            yield event.plain_result("❌ 打标失败。请确认当前 LLM provider 支持图像输入，并适当调大 tagger_max_tokens。")
+            return
+        payload = self._parse_json_object(raw)
+        normalized = self._normalize_tag_output(payload)
+        if normalized is None:
+            yield event.plain_result(f"❌ 打标结果解析失败（非 JSON）。原始输出：\n{raw[:500]}")
+            return
+        yield event.plain_result(self._format_tag_output(normalized))
+
+    @filter.command("画师推荐", prefix_optional=True)
+    async def on_artist_recommend(self, event: AstrMessageEvent):
+        """画师推荐：LLM 提取需求标签 → 本地预设库模糊匹配候选 → 组合画师串。"""
+        if not self.conf.get("artist_recommend_enabled", False):
+            yield event.plain_result("画师推荐功能未开启，请在设置中开启 artist_recommend_enabled")
+            return
+        raw = event.message_str.strip()
+        raw = raw.removeprefix("画师推荐").strip()
+        if not raw:
+            yield event.plain_result("📝 用法：`>>画师推荐 <画风需求>` 如：`>>画师推荐 细腻的赛博朋克厚涂`")
+            return
+        # 1. 提取需求标签
+        extract_prompt = EXTRACT_TAGS_TEMPLATE.replace("<<USER_REQUEST>>", raw)
+        extracted = await self._llm_generate_text(event, extract_prompt, temperature=0.2, max_tokens=200)
+        if not extracted:
+            yield event.plain_result("❌ 标签提取失败，请稍后重试。")
+            return
+        # 2. 本地预设库模糊匹配
+        search_text = extracted.lower()
+        max_candidates = max(1, int(self.conf.get("artist_recommend_max_candidates", 10) or 10))
+        min_match = max(1, int(self.conf.get("artist_recommend_min_match", 3) or 3))
+        matched: List[str] = []
+        for p in self.artist_presets:
+            haystack = f"{p.get('name', '')} {p.get('artists', '')}".lower()
+            score = sum(1 for kw in re.findall(r"[a-z0-9_@]+", search_text) if kw in haystack)
+            if score >= 1:
+                matched.append(p["name"])
+        matched = list(dict.fromkeys(matched))[:max_candidates]
+        if len(matched) < min_match:
+            names = "、".join(p.get("name", "") for p in self.artist_presets) or "（无）"
+            yield event.plain_result(f"❌ 库中匹配画师不足（需 ≥{min_match}，仅匹配 {len(matched)} 个）。"
+                                     f"请先在 WebUI 画师串管理中添加更多预设。\n当前库: {names}")
+            return
+        # 3. 组合画师串
+        pool_text = "\n".join(matched)
+        model_version = str(self.conf.get("extra_prefix", "") or "")
+        artist_prompt = ARTIST_FROM_POOL_TEMPLATE \
+            .replace("<<USER_REQUEST>>", raw) \
+            .replace("<<MODEL_VERSION>>", model_version or "V4.5") \
+            .replace("<<CANDIDATE_ARTISTS>>", pool_text)
+        artist_str = await self._llm_generate_text(event, artist_prompt, temperature=0.6, max_tokens=400)
+        if not artist_str:
+            yield event.plain_result("❌ 画师串生成失败，请稍后重试。")
+            return
+        artist_str = self._strip_code_fence(artist_str).strip()
+        if not artist_str:
+            yield event.plain_result("❌ 画师串生成为空，请稍后重试。")
+            return
+        self._last_artist_recommendation = artist_str
+        yield event.plain_result(
+            f"🎨 候选画师串（来自库内 {len(matched)} 个预设）：\n{artist_str}\n\n"
+            f"💡 输入 `>>画师串保存 <名称>` 保存到预设库，或 `>>画师串 <名称>` 直接切换，`>>画师串 off` 放弃")
+
+    @filter.command("画师串保存", prefix_optional=True)
+    async def on_artist_save(self, event: AstrMessageEvent):
+        """把最近一次画师推荐结果保存到预设库。格式：画师串保存 <名称>"""
+        if not self.is_global_admin(event):
+            yield event.plain_result("仅管理员可保存画师串预设")
+            return
+        param = event.message_str.strip()
+        param = param.removeprefix("画师串保存").strip()
+        if not param:
+            yield event.plain_result("📝 用法：`>>画师串保存 <名称>`（保存最近一次画师推荐结果）")
+            return
+        # 优先用最近一次画师推荐结果；无则回退内联格式 名称:画师串
+        if not self._last_artist_recommendation:
+            yield event.plain_result("暂无最近画师推荐结果。请先使用 `>>画师推荐 <需求>` 生成候选画师串，"
+                                     "或使用内联格式 `>>画师串保存 <名称>:artist:a, artist:b`")
+            return
+        self.artist_presets = [p for p in self.artist_presets if p.get("name") != param]
+        self.artist_presets.append({"name": param, "artists": self._last_artist_recommendation, "negative": ""})
+        await self._save_artist_presets()
+        self._last_artist_recommendation = ""
+        yield event.plain_result(f"✅ 画师串预设 [{param}] 已保存（来自最近推荐）")
+
     @filter.command("生图日志", prefix_optional=True)
     async def on_generation_log(self, event: AstrMessageEvent):
         """查询/删除生图日志（仅管理员）"""
@@ -1699,13 +1993,17 @@ class FigurineProPlugin(Star):
 
         LLM 工具（generate_image）用：拿到用户附带的参考图做图+文生图；无图返回空列表（纯文生图）。
         注意：不走 self.iwf.get_images 的头像兜底逻辑（LLM 场景不该自动用头像当参考图）。
+        无图时尝试 OneBot get_msg 回退（引用消息已过期/仅回复 id 时，从服务器拉取原消息图片）。
         """
         if not self.iwf or not event.message_obj or not getattr(event.message_obj, "message", None):
             return []
         img_bytes_list: List[bytes] = []
+        reply_id = None
         try:
             for seg in event.message_obj.message:
                 if isinstance(seg, Reply) and getattr(seg, "chain", None):
+                    if getattr(seg, "id", None) and reply_id is None:
+                        reply_id = seg.id
                     for s_chain in seg.chain:
                         if isinstance(s_chain, Image):
                             if img := await self.iwf._image_component_to_bytes(s_chain):
@@ -1715,7 +2013,48 @@ class FigurineProPlugin(Star):
                         img_bytes_list.append(img)
         except Exception as e:
             logger.warning(f"[NewImage] 提取当前消息图片失败: {e}", exc_info=True)
+        if img_bytes_list:
+            return img_bytes_list
+        # OneBot get_msg 回退：引用消息只有 id 时拉取原消息图片
+        if reply_id is not None:
+            img_bytes_list = await self._fetch_reply_images_via_onebot(event, reply_id)
         return img_bytes_list
+
+    async def _fetch_reply_images_via_onebot(self, event: AstrMessageEvent, message_id) -> List[bytes]:
+        """通过 OneBot get_msg 拉取指定消息里的图片（打标/图生图引用回退用）。"""
+        if not self.iwf:
+            return []
+        call = self._resolve_call_action(event)
+        if call is None:
+            return []
+        params_list = [{"message_id": message_id}]
+        if str(message_id).isdigit():
+            params_list.append({"message_id": int(message_id)})
+        for params in params_list:
+            try:
+                result = await call("get_msg", **params)
+                if isinstance(result, dict) and "data" in result:
+                    result = result["data"]
+                message_segments = result.get("message") if isinstance(result, dict) else None
+                if not isinstance(message_segments, list):
+                    continue
+                images: List[bytes] = []
+                for item in message_segments:
+                    if not isinstance(item, dict) or item.get("type") != "image":
+                        continue
+                    data = item.get("data") or {}
+                    src = str(data.get("file") or data.get("url") or "").strip()
+                    if not src:
+                        continue
+                    raw = await self.iwf._load_bytes(src)
+                    if raw:
+                        images.append(raw)
+                if images:
+                    return images
+            except Exception as e:
+                logger.warning(f"[NewImage] get_msg 拉取回复图片失败: {e}")
+                continue
+        return []
 
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
@@ -1813,10 +2152,12 @@ class FigurineProPlugin(Star):
                     else:
                         remaining = self._get_user_count(sender_id)
                     try:
-                        await event.send(MessageChain(chain=[
-                            Image.fromBytes(res),
-                            Plain(f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"),
-                        ]))
+                        caption = f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"
+                        send_res = await self._send_image_with_recall(event, res, caption)
+                        if send_res == "USE_CHAIN_RESULT":
+                            await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(caption)]))
+                        elif send_res:
+                            await event.send(MessageChain(chain=[Plain(f"❌ 发送失败: {send_res}")]))
                     except Exception as e:
                         logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
                 else:
@@ -2084,6 +2425,190 @@ class FigurineProPlugin(Star):
                 self.group_task_counts[group_id] = current - 1
             logger.debug(f"[FigurinePro] 群 {group_id} 任务释放，当前 {self.group_task_counts.get(group_id, 0)}")
 
+    async def _check_novai_key(self, base_url: str, api_key: str) -> dict:
+        """NovelAI token 预检：GET {user_url}/user/data 解析订阅信息。
+
+        返回 {"ok": bool, "error": str|None, **subscription_info}。
+        有效判定：active 为真 或 purchasedTrainingSteps>0 或 fixedTrainingStepsLeft>0。
+        失败/超时不抛异常，返回 {"ok": False, "error": 原因}（软校验，不拦截生图）。
+        """
+        try:
+            if not self.iwf:
+                return {"ok": False, "error": "ImageWorkflow 未初始化"}
+            base = (base_url or "").rstrip("/")
+            if not base:
+                return {"ok": False, "error": "user_url 未配置"}
+            endpoint = f"{base}/user/data"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Origin": "https://novelai.net",
+                "Referer": "https://novelai.net",
+                "User-Agent": NOVALAI_UA,
+                "Content-Type": "application/json",
+            }
+            timeout = max(1, int(self.conf.get("novai_precheck_timeout", 10) or 10))
+            async with self.iwf.session.get(
+                endpoint, headers=headers, proxy=self.iwf.proxy, timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    body = (await resp.read())[:200].decode("utf-8", errors="replace")
+                    return {"ok": False, "error": f"HTTP {resp.status}: {body[:200]}"}
+                data = await resp.json()
+            subscription = data.get("subscription") if isinstance(data, dict) else None
+            if not isinstance(subscription, dict):
+                return {"ok": False, "error": "响应缺少 subscription 字段"}
+            active = bool(subscription.get("active"))
+            purchased = int(subscription.get("purchasedTrainingSteps") or 0)
+            fixed_left = int(subscription.get("fixedTrainingStepsLeft") or 0)
+            training_left = int(subscription.get("trainingStepsLeft") or 0)
+            ok = active or purchased > 0 or fixed_left > 0
+            warn_threshold = max(0, int(self.conf.get("novai_point_warn_threshold", 10) or 10))
+            warn = ok and training_left >= 0 and 0 < training_left <= warn_threshold
+            return {
+                "ok": ok,
+                "error": None if ok else "订阅无效（非活跃且无训练步数）",
+                "active": active,
+                "tier": subscription.get("tier"),
+                "expires_at": subscription.get("expiresAt"),
+                "training_steps_left": training_left,
+                "purchased_training_steps": purchased,
+                "fixed_training_steps_left": fixed_left,
+                "low_points_warning": warn,
+            }
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": "预检请求超时"}
+        except Exception as e:
+            logger.warning(f"[NewImage] NovelAI token 预检失败: {e}")
+            return {"ok": False, "error": str(e)[:200]}
+
+    async def _run_novai_precheck(self, provider: Dict[str, Any], user_url: str, api_key: str, pname: str) -> None:
+        """后台 token 预检包装：结果写 provider["_user_status"] 并打日志（不 await 调用方）。"""
+        try:
+            if not self.conf.get("novai_precheck_enabled", True):
+                return
+            status = await self._check_novai_key(user_url, api_key)
+            provider["_user_status"] = status
+            if status.get("ok"):
+                logger.info(f"[NewImage] NovelAI 提供商「{pname}」token 有效"
+                            f"（tier={status.get('tier')}, 训练步数剩 {status.get('training_steps_left')}）")
+                if status.get("low_points_warning"):
+                    logger.warning(f"[NewImage] NovelAI 提供商「{pname}」剩余训练步数不足 "
+                                   f"({status.get('training_steps_left')})")
+            else:
+                logger.warning(f"[NewImage] NovelAI 提供商「{pname}」token 预检失败: {status.get('error')}")
+        except Exception as e:
+            logger.warning(f"[NewImage] NovelAI 提供商「{pname}」token 预检异常: {e}")
+
+    def _resolve_call_action(self, event: AstrMessageEvent):
+        """解析 event 上的 call_action 可调用对象（兼容 bot.call_action / bot.api.call_action）。"""
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+        return (getattr(bot, "call_action", None)
+                or getattr(getattr(bot, "api", None), "call_action", None)
+                or None)
+
+    def _is_auto_recall_enabled(self, event: AstrMessageEvent) -> bool:
+        """自动撤回开关：配置开启 且 平台为 aiocqhttp 且 群/会话在白名单内（空=不限制）。
+
+        白名单键格式：f"{platform}:{chat_id}"，chat_id 用群号（群聊）或会话 id（私聊）。
+        """
+        if not self.conf.get("auto_recall_enabled", False):
+            return False
+        if event.get_platform_name() != "aiocqhttp":
+            return False
+        if self._resolve_call_action(event) is None:
+            return False
+        allowed = self.conf.get("auto_recall_allowed_groups", []) or []
+        if not allowed:
+            return True
+        platform = event.get_platform_name()
+        group_id = event.get_group_id()
+        chat_id = str(group_id) if group_id else str(getattr(event, "unified_msg_origin", "") or "")
+        return f"{platform}:{chat_id}" in [str(x) for x in allowed]
+
+    async def _send_image_get_message_id(self, event: AstrMessageEvent, image_bytes: bytes) -> Optional[str]:
+        """aiocqhttp 下直发图片并取 message_id（用于自动撤回）。
+
+        用 call_action send_group_msg / send_private_msg 直发（payload message=[{type:image,...}]），
+        拿 data.message_id；失败/非 OneBot 返回 None。
+        """
+        call = self._resolve_call_action(event)
+        if call is None:
+            return None
+        try:
+            b64 = base64.b64encode(image_bytes).decode("utf-8")
+            message = [{"type": "image", "data": {"file": f"base64://{b64}"}}]
+            group_id = event.get_group_id()
+            if group_id:
+                try:
+                    group_id = int(group_id)
+                except (TypeError, ValueError):
+                    pass
+                result = await call("send_group_msg", group_id=group_id, message=message)
+            else:
+                user_id = event.get_sender_id()
+                try:
+                    user_id = int(user_id)
+                except (TypeError, ValueError):
+                    pass
+                result = await call("send_private_msg", user_id=user_id, message=message)
+            if isinstance(result, dict):
+                return result.get("message_id")
+            return None
+        except Exception as e:
+            logger.warning(f"[NewImage] 直发图片取 message_id 失败（降级）: {e}")
+            return None
+
+    async def _delete_onebot_message(self, event: AstrMessageEvent, message_id):
+        """调用 OneBot delete_msg 撤回消息（失败仅告警）。"""
+        if not message_id:
+            return
+        call = self._resolve_call_action(event)
+        if call is None:
+            return
+        try:
+            await call("delete_msg", message_id=message_id)
+        except Exception as e:
+            logger.warning(f"[NewImage] 自动撤回消息失败: {e}")
+
+    async def _schedule_recall(self, event: AstrMessageEvent, message_id):
+        """延迟自动撤回（sleep 后 delete，任务入 _bg_tasks 防 GC）。"""
+        if not message_id:
+            return
+        delay = max(0, int(self.conf.get("auto_recall_delay", 5) or 5))
+
+        async def _recall():
+            try:
+                await asyncio.sleep(delay)
+                await self._delete_onebot_message(event, message_id)
+            except Exception as e:
+                logger.warning(f"[NewImage] 自动撤回调度异常: {e}")
+
+        task = asyncio.create_task(_recall())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _send_image_with_recall(self, event: AstrMessageEvent, image_bytes: bytes,
+                                      caption: str) -> Optional[str]:
+        """发图 + 自动撤回统一入口。
+
+        返回 None=正常发送（含已调度撤回或已降级）；返回 str=发送失败原因（非空表示失败）。
+        自动撤回开启时：OneBot 直发拿 message_id → 调度撤回 → 由调用方 yield 纯文字 caption；
+        未开启/非 OneBot：返回特殊标记 "USE_CHAIN_RESULT" 让调用方用原 chain_result 发图+文字。
+        """
+        if not self._is_auto_recall_enabled(event):
+            return "USE_CHAIN_RESULT"
+        message_id = await self._send_image_get_message_id(event, image_bytes)
+        if message_id is None:
+            # 直发失败：降级走原 chain_result（拿不到 id 则不撤回）
+            return "USE_CHAIN_RESULT"
+        await self._schedule_recall(event, message_id)
+        try:
+            await event.send(MessageChain(chain=[Plain(caption)]))
+        except Exception as e:
+            logger.error(f"[NewImage] 自动撤回模式发送 caption 失败: {e}", exc_info=True)
+        return None
 
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
                         group_id: Optional[str] = None, model_override: Optional[str] = None,
@@ -2193,11 +2718,30 @@ class FigurineProPlugin(Star):
                 final_params["negative_prompt"] = f"{existing_neg}, {preset_neg}" if existing_neg else preset_neg
                 logger.info(f"[NewImage] 群 {group_id} 画师串预设「{artist_preset.get('name', '')}」并入负面词")
 
+        # ========== NSFW 过滤（统一前置到负面词） ==========
+        # nsfw_filter_enabled 开启时，把过滤标签前置到负面词最前（画师串/渠道/模型/显式负面词之后仍会叠加）。
+        # 对 Gemini / NovalAI 官方 / NovalAI 反代三条路由统一生效（它们都从 final_params["negative_prompt"] 读取）。
+        if self.conf.get("nsfw_filter_enabled", False):
+            filter_tags = str(self.conf.get("nsfw_filter_tags", "") or "").strip()
+            if not filter_tags:
+                filter_tags = "{{{{{nsfw}}}}}"
+            existing_neg = str(final_params.get("negative_prompt", "") or "").strip()
+            final_params["negative_prompt"] = f"{filter_tags}, {existing_neg}" if existing_neg else filter_tags
+            logger.debug("[NewImage] 已应用 NSFW 过滤标签")
+
         # ========== 按提供商 type 选择路由 ==========
         if provider_type == "gemini":
             return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                image_size, source_info, final_params), model_name
         elif provider_type == "novalai":
+            # token 预检结果软校验（_user_status 由 initialize 后台写入；不拦截生图，仅打日志）
+            user_status = provider.get("_user_status")
+            if isinstance(user_status, dict):
+                if not user_status.get("ok"):
+                    logger.warning(f"[NewImage] NovelAI token 预检失败: {user_status.get('error')}")
+                elif user_status.get("low_points_warning"):
+                    logger.warning(f"[NewImage] NovelAI 剩余训练步数不足 "
+                                   f"({user_status.get('training_steps_left')})，请及时充值/续费")
             if provider.get("use_reverse_proxy"):
                 return await self._call_novalai_reverse_proxy_api(api_url, api_key, model_name, image_bytes_list,
                                                                   prompt, image_size, source_info,
@@ -2887,6 +3431,25 @@ class FigurineProPlugin(Star):
         # 帮助/预设
         "help_menu": str,
         "prompt_list": list,         # 生图触发词与提示词（每元素 "触发词:提示词"）
+        # 打标（图片反推）
+        "tagger_provider_id": str,   # 打标专用 LLM provider（空=用当前会话 provider）
+        "tagger_temperature": float, # 打标 temperature
+        "tagger_max_tokens": int,    # 打标 max_tokens
+        # 画师推荐
+        "artist_recommend_enabled": bool,
+        "artist_recommend_max_candidates": int,
+        "artist_recommend_min_match": int,
+        # NovelAI token 预检
+        "novai_precheck_enabled": bool,
+        "novai_precheck_timeout": int,
+        "novai_point_warn_threshold": int,
+        # 自动撤回
+        "auto_recall_enabled": bool,
+        "auto_recall_delay": int,
+        "auto_recall_allowed_groups": list,
+        # NSFW 过滤
+        "nsfw_filter_enabled": bool,
+        "nsfw_filter_tags": str,
     }
 
     def _register_web_apis(self) -> None:
@@ -2979,6 +3542,7 @@ class FigurineProPlugin(Star):
                     "api_key": str(p.get("api_key", "") or ""),
                     "api_key_masked": self._mask_api_key(p.get("api_key", "")),
                     "base_url": p.get("base_url", ""),
+                    "user_url": str(p.get("user_url", "") or ""),
                     "use_reverse_proxy": bool(p.get("use_reverse_proxy", False)),
                     "enabled": bool(p.get("enabled", True)),
                     "model_count": len(p.get("models") or []),
@@ -3013,6 +3577,7 @@ class FigurineProPlugin(Star):
                 "type": ptype,
                 "api_key": api_key,
                 "base_url": base_url,
+                "user_url": str(payload.get("user_url", "") or "").strip(),
                 "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
                 "enabled": True,
                 "models": list(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
@@ -3077,6 +3642,9 @@ class FigurineProPlugin(Star):
                 if not base_url:
                     return error_response("BaseURL 不能为空")
                 target["base_url"] = base_url
+            if "user_url" in payload:
+                user_url = str(payload.get("user_url", "") or "").strip()
+                target["user_url"] = user_url
             if "api_key" in payload:
                 api_key = str(payload.get("api_key", "") or "").strip()
                 if api_key:  # 传空串表示不修改，保留原值
@@ -3551,6 +4119,25 @@ class FigurineProPlugin(Star):
                 # 帮助/预设
                 "help_menu": str(self.conf.get("help_menu", "") or ""),
                 "prompt_list": self.conf.get("prompt_list", []),
+                # 打标
+                "tagger_provider_id": str(self.conf.get("tagger_provider_id", "") or ""),
+                "tagger_temperature": self.conf.get("tagger_temperature", 0.2),
+                "tagger_max_tokens": self.conf.get("tagger_max_tokens", 900),
+                # 画师推荐
+                "artist_recommend_enabled": bool(self.conf.get("artist_recommend_enabled", False)),
+                "artist_recommend_max_candidates": self.conf.get("artist_recommend_max_candidates", 10),
+                "artist_recommend_min_match": self.conf.get("artist_recommend_min_match", 3),
+                # NovelAI token 预检
+                "novai_precheck_enabled": bool(self.conf.get("novai_precheck_enabled", True)),
+                "novai_precheck_timeout": self.conf.get("novai_precheck_timeout", 10),
+                "novai_point_warn_threshold": self.conf.get("novai_point_warn_threshold", 10),
+                # 自动撤回
+                "auto_recall_enabled": bool(self.conf.get("auto_recall_enabled", False)),
+                "auto_recall_delay": self.conf.get("auto_recall_delay", 5),
+                "auto_recall_allowed_groups": self.conf.get("auto_recall_allowed_groups", []),
+                # NSFW 过滤
+                "nsfw_filter_enabled": bool(self.conf.get("nsfw_filter_enabled", False)),
+                "nsfw_filter_tags": str(self.conf.get("nsfw_filter_tags", "") or ""),
             })
         except Exception as e:
             return error_response(str(e))
