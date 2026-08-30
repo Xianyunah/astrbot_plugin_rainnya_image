@@ -24,7 +24,7 @@
       <nav class="side-nav" aria-label="页面导航">
         <button type="button" class="nav-item is-active" data-nav="models" aria-current="page">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-          <span>模型管理</span>
+          <span>提供商管理</span>
         </button>
         <button type="button" class="nav-item" data-nav="counts">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
@@ -52,7 +52,7 @@
       <header class="appbar">
         <div class="appbar-inner">
           <span class="appbar-brand">喵喵生图 <i>·</i> NewImage</span>
-          <h2 class="page-title" id="pageTitle">模型管理</h2>
+          <h2 class="page-title" id="pageTitle">提供商管理</h2>
           <span class="appbar-spacer"></span>
           <button type="button" class="btn btn-ghost btn-sm" id="btnRefresh" title="刷新当前页">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
@@ -64,13 +64,78 @@
       <!-- ======== 主内容 ======== -->
       <main class="content">
 
-        <!-- ============ 页面：模型管理 ============ -->
+        <!-- ============ 页面：提供商管理 ============ -->
         <section class="page" data-page="models" id="page-models" aria-labelledby="pageTitle">
+
+        <!-- ===== 视图一：提供商列表 ===== -->
+        <div id="providersView">
           <div class="card">
             <div class="card-head">
               <div>
-                <h3 class="card-title">可用模型</h3>
-                <p class="card-desc">配置生图模型：每次消耗配额、给 LLM 的说明、默认参数与允许分辨率。内联编辑后保存。</p>
+                <h3 class="card-title">提供商列表</h3>
+                <p class="card-desc">管理生图 API 提供商（Gemini / OpenAI / NovalAI）。每个提供商独立配置 API Key、BaseURL 与模型列表。</p>
+              </div>
+              <div class="card-actions">
+                <button type="button" class="btn btn-accent" id="btnAddProvider">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                  <span>+ 添加提供商</span>
+                </button>
+              </div>
+            </div>
+            <div class="provider-list" id="providersList">
+              <div class="skel skel-block"><span class="caret"></span>加载提供商中…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 视图二：提供商详情 ===== -->
+        <div id="providerDetailView" hidden>
+          <div class="card detail-head">
+            <button type="button" class="btn btn-ghost btn-sm" id="btnBackProviders">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+              <span>返回</span>
+            </button>
+            <span class="type-badge" id="pdTypeBadge">Gemini</span>
+            <h3 class="card-title" id="pdTitle">提供商详情</h3>
+            <span class="appbar-spacer"></span>
+            <button type="button" class="btn btn-danger btn-sm" id="btnDeleteProvider">删除提供商</button>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">API 配置</h3>
+                <p class="card-desc">修改该提供商的连接信息。API Key 留空表示不修改。</p>
+              </div>
+              <div class="card-actions">
+                <button type="button" class="btn btn-accent" id="btnProviderCfgSave">保存配置</button>
+              </div>
+            </div>
+            <div class="form provider-form-grid">
+              <label class="field">
+                <span class="field-label">提供商名字</span>
+                <input type="text" id="pdName" class="input" placeholder="例如 主力 Gemini">
+              </label>
+              <label class="field">
+                <span class="field-label">API Key（留空 = 不修改）</span>
+                <input type="password" id="pdApiKey" class="input" placeholder="留空表示不修改">
+              </label>
+              <label class="field">
+                <span class="field-label">BaseURL</span>
+                <input type="text" id="pdBaseUrl" class="input" placeholder="https://api.example.com">
+              </label>
+              <label class="field field-row">
+                <span class="field-label">启用该提供商</span>
+                <input type="checkbox" id="pdEnabled" class="switch">
+              </label>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h3 class="card-title">模型管理</h3>
+                <p class="card-desc">配置该提供商下的生图模型：每次消耗配额、给 LLM 的说明、默认参数与允许分辨率。内联编辑后保存。</p>
               </div>
               <div class="card-actions">
                 <button type="button" class="btn btn-ghost" id="btnModelsReset">重置</button>
@@ -99,6 +164,7 @@
               <span class="card-foot-note" id="modelsNote">每行模型：名称;配额;说明;{参数JSON}，支持 sizes 键限制分辨率</span>
             </div>
           </div>
+        </div>
         </section>
 
         <!-- ============ 页面：次数管理 ============ -->
@@ -287,6 +353,57 @@
         </section>
 
       </main>
+    </div>
+  </div>
+
+  <!-- ======== 添加 / 编辑提供商弹层 ======== -->
+  <div class="modal-mask" id="providerModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="providerModalTitle">
+      <div class="modal-head">
+        <h3 id="providerModalTitle">添加提供商</h3>
+        <button type="button" class="btn-icon" id="providerClose" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div id="templatePick">
+          <p class="modal-desc">选择提供商类型模板</p>
+          <div class="template-row" id="templateRow">
+            <button type="button" class="template-card is-selected" data-type="gemini">
+              <span class="template-icon type-gemini">G</span>
+              <span class="template-name">Gemini</span>
+            </button>
+            <button type="button" class="template-card" data-type="openai">
+              <span class="template-icon type-openai">O</span>
+              <span class="template-name">OpenAI</span>
+            </button>
+            <button type="button" class="template-card" data-type="novalai">
+              <span class="template-icon type-novalai">N</span>
+              <span class="template-name">NovalAI</span>
+            </button>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">提供商名字</span>
+          <input type="text" id="provName" class="input" placeholder="例如 主力 Gemini" maxlength="32">
+        </label>
+        <label class="field">
+          <span class="field-label">API Key</span>
+          <input type="password" id="provKey" class="input" placeholder="粘贴 API Key" autocomplete="off">
+        </label>
+        <label class="field">
+          <span class="field-label">BaseURL</span>
+          <input type="text" id="provUrl" class="input" placeholder="https://api.example.com">
+        </label>
+        <label class="field field-row" id="provEnabledField" hidden>
+          <span class="field-label">启用该提供商</span>
+          <input type="checkbox" id="provEnabled" class="switch">
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="providerCancel">取消</button>
+        <button type="button" class="btn btn-accent" id="providerSave">保存</button>
+      </div>
     </div>
   </div>
 

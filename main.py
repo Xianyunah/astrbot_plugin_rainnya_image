@@ -4,6 +4,7 @@ import functools
 import json
 import random
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -15,7 +16,6 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.provider import Provider
 
 from .image_parser import extract_image_bytes_from_response
 from .image_workflow import ImageWorkflow
@@ -184,17 +184,15 @@ class FigurineProPlugin(Star):
         self._bg_tasks: set = set()          # 后台生图任务引用集合（防 GC + terminate 时回收）
         self._log_page_msgid: Dict[Any, Any] = {}  # (会话, 发送者) -> {"msgid": 消息id, "page": 页码, "scope": 范围, "count": 条数}
         self.prompt_map: Dict[str, str] = {}
-        self.key_index = 0
-        self.key_lock = asyncio.Lock()
         self.iwf: Optional[ImageWorkflow] = None
         self.group_task_counts: Dict[str, int] = {}
         self.queue_lock = asyncio.Lock()
         self.group_task_limit: int = 0
         self.api_timeout: int = 120
         self.user_count_cap: int = 0  # 用户持有次数上限，0表示不限制
-        # 供应商相关
-        self.provider_id: str = ""
-        self.provider: Optional[Provider] = None
+        # 多提供商架构（providers.json 持久化，见 _load_providers）
+        self.providers_file = self.plugin_data_dir / "providers.json"
+        self.providers: List[Dict[str, Any]] = []
         # Gemini 模式相关
         self.is_gemini_api: bool = False
         self.safety_level: str = ""
@@ -222,8 +220,8 @@ class FigurineProPlugin(Star):
         await self._load_user_counts()
         await self._load_group_counts()
         await self._load_user_checkin_data()
-        # 加载可用模型列表（model 配置支持多行填写，每行格式：模型名;每次消耗配额;说明）
-        self._parse_available_models()
+        # 加载多提供商配置（providers.json）：构建 self.providers + 扁平化 available_models/available_model_names
+        await self._load_providers()
         if self.available_models:
             logger.info(f"NewImage: 已解析 {len(self.available_models)} 个可用模型（按每次消耗配额计次）")
             for m in self.available_models:
@@ -262,90 +260,236 @@ class FigurineProPlugin(Star):
             if self.hires_whitelist:
                 logger.info(f"  高分辨率白名单: {len(self.hires_whitelist)} 人")
         
-        # 加载供应商配置
-        self.provider_id = self.conf.get("provider_id", "")
-        if self.provider_id:
-            self.provider = self.context.get_provider_by_id(self.provider_id)
-            if self.provider:
-                logger.info(f"NewImage 插件已加载，使用提供商: {self.provider_id}")
-            else:
-                logger.warning(f"NewImage: 未找到提供商 '{self.provider_id}'，将使用手动配置")
+        # 多提供商已由 _load_providers 加载（providers.json），此处仅输出状态
+        if not self.providers:
+            logger.warning("NewImage: 未配置任何提供商，插件可能无法工作")
         else:
-            logger.info("NewImage 插件已加载，使用手动API配置")
-            if not self.conf.get("api_keys") and not self.conf.get("api_url"):
-                logger.warning("NewImage: 未配置提供商，也未配置手动API，插件可能无法工作")
+            _enabled = sum(1 for p in self.providers if p.get("enabled", True))
+            logger.info(f"NewImage 插件已加载，共 {len(self.providers)} 个提供商（{_enabled} 个启用），"
+                        f"{len(self.available_models)} 个可用模型")
 
-    def _parse_available_models(self) -> None:
-        """解析 model 配置（每行一个模型，格式：模型名;每次消耗配额;说明;{参数JSON}，分号分隔）。
+    async def _load_providers(self) -> None:
+        """加载多提供商配置（providers.json）并扁平化 available_models / available_model_names。
+
+        providers.json 不存在或 providers 为空时，从旧版手动配置（conf.model / api_url / api_keys /
+        is_gemini_api）迁移构建一个「默认提供商」并写回 providers.json（一次性的，后续以 providers.json 为准）。
+
+        扁平化规则：遍历所有提供商（含禁用），仅启用提供商的模型进入 available_models / available_model_names，
+        元素在原有 name/quota/desc/params/allowed_sizes 结构上新增 provider_id 字段，其余逻辑全部兼容。
+        模型名去重（保留顺序），重复名取第一个出现的提供商/条目。
+        """
+        self.providers = []
+        data = await load_json(self.providers_file)
+        if isinstance(data, dict):
+            providers = data.get("providers")
+            if isinstance(providers, list):
+                self.providers = [p for p in providers if isinstance(p, dict)]
+        if not self.providers:
+            # 迁移：旧配置不存在 providers.json 或为空 → 构建默认提供商并写回
+            self.providers = self._build_legacy_provider()
+            try:
+                await save_json(self.providers_file, {"providers": self.providers})
+                logger.info(f"[NewImage] 已从旧版手动配置迁移生成默认提供商，写入 {self.providers_file}")
+            except Exception as e:
+                logger.error(f"[NewImage] 写入 providers.json 失败: {e}", exc_info=True)
+        # 扁平化
+        self.available_models = []
+        self.available_model_names = []
+        seen: set = set()
+        for p in self.providers:
+            if not p.get("enabled", True):
+                continue  # 禁用的提供商不参与可用模型列表
+            pid = str(p.get("id", ""))
+            for m in (p.get("models") or []):
+                if not isinstance(m, dict):
+                    continue
+                name = str(m.get("name", "") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                self.available_models.append({
+                    "provider_id": pid,
+                    "name": name,
+                    "quota": int(m.get("quota", 1)),
+                    "desc": str(m.get("desc", "") or ""),
+                    "params": dict(m.get("params") or {}),
+                    "allowed_sizes": m.get("allowed_sizes"),
+                })
+                self.available_model_names.append(name)
+
+    def _build_legacy_provider(self) -> List[Dict[str, Any]]:
+        """从旧版手动配置构建单个「默认提供商」（迁移用）。
+
+        type = gemini（is_gemini_api 开）/ openai；api_key = conf.api_keys[0]；
+        base_url = conf.api_url；models = 复用 _parse_models_lines 解析 conf.model。
+        """
+        raw_model = str(self.conf.get("model", "") or "")
+        models = self._parse_models_lines(raw_model.split("\n"))
+        keys = self.conf.get("api_keys", []) or []
+        api_key = str(keys[0]) if keys else ""
+        return [{
+            "id": self._new_provider_id(),
+            "name": "默认提供商",
+            "type": "gemini" if bool(self.conf.get("is_gemini_api", False)) else "openai",
+            "api_key": api_key,
+            "base_url": str(self.conf.get("api_url", "") or "").strip(),
+            "enabled": True,
+            "models": models,
+        }]
+
+    def _new_provider_id(self) -> str:
+        """生成唯一提供商 id（p_ + 毫秒时间戳 + 随机数）。"""
+        return f"p_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+    async def _save_providers(self) -> None:
+        """原子写 providers.json（self.providers 当前内存态）。"""
+        try:
+            await save_json(self.providers_file, {"providers": self.providers})
+        except Exception as e:
+            logger.error(f"[NewImage] 写入 providers.json 失败: {e}", exc_info=True)
+
+    def _find_provider_for_model(self, name: str) -> Optional[Dict[str, Any]]:
+        """在 self.providers 中查找包含指定模型的提供商（按模型名匹配，返回首个）。
+
+        找不到返回 None。注意：本方法不区分启用/禁用，由调用方（_call_api）判定并给出针对性错误。
+        """
+        if not name:
+            return None
+        for p in self.providers:
+            for m in (p.get("models") or []):
+                if isinstance(m, dict) and str(m.get("name", "") or "").strip() == name:
+                    return p
+        return None
+
+    def _mask_api_key(self, key: str) -> str:
+        """API Key 掩码：前4位***后4位；空串返回空串。"""
+        key = str(key or "")
+        if not key:
+            return ""
+        if len(key) <= 8:
+            return "***"
+        return f"{key[:4]}***{key[-4:]}"
+
+    def _parse_model_line(self, line: str) -> Optional[Dict[str, Any]]:
+        """解析单行模型配置（格式：模型名;每次消耗配额;说明;{参数JSON}，分号分隔）。
 
         兼容旧格式：只有模型名 → 配额 1、说明空；2 段 → 配额（非法则 1）；3 段 → 含说明。
         第 4 段为参数 JSON（默认生成参数，可缺省）：只保留 PARAM_SCHEMA 中的键，
         对已知键做类型/范围校验，非法或越界的丢弃（log.warning，配置数据宁可丢弃不报错）。
         参数 JSON 里可含 `sizes` 键（模型允许分辨率限制，如 {"sizes":["1K"]}）：
         识别后从 params 中移除并写入条目 allowed_sizes（None=不限制走全局；空数组视为不限制；
-        值非法则忽略该键 log.warning）。
-        模型名去重（保留顺序），重复名取第一条的配额/说明/参数。
+        值非法则忽略该键 log.warning）。解析失败返回 None（空行/无模型名）。
         """
-        self.available_models = []
-        self.available_model_names = []
-        seen: set = set()
-        raw_models = (self.conf.get("model", "") or "").split("\n")
-        for line in raw_models:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(";")
-            name = parts[0].strip()
-            if not name:
-                continue
-            quota = 1
-            desc = ""
-            params: Dict = {}
-            allowed_sizes: Optional[List[str]] = None
-            if len(parts) >= 2:
-                q_raw = parts[1].strip()
+        line = line.strip()
+        if not line:
+            return None
+        parts = line.split(";")
+        name = parts[0].strip()
+        if not name:
+            return None
+        quota = 1
+        desc = ""
+        params: Dict = {}
+        allowed_sizes: Optional[List[str]] = None
+        if len(parts) >= 2:
+            q_raw = parts[1].strip()
+            try:
+                quota = max(1, int(q_raw))
+            except (TypeError, ValueError):
+                quota = 1
+        if len(parts) >= 3:
+            # desc 半角分号已由 _serialize_models_lines 转义为全角，此处还原（round-trip 对称）
+            desc = parts[2].strip().replace("；", ";")
+        if len(parts) >= 4:
+            raw_params = parts[3].strip()
+            if raw_params:
                 try:
-                    quota = max(1, int(q_raw))
-                except (TypeError, ValueError):
-                    quota = 1
-            if len(parts) >= 3:
-                # desc 半角分号已由 _web_models_post 转义为全角，此处还原（round-trip 对称）
-                desc = parts[2].strip().replace("；", ";")
-            if len(parts) >= 4:
-                raw_params = parts[3].strip()
-                if raw_params:
-                    try:
-                        parsed = json.loads(raw_params)
-                    except (ValueError, TypeError):
-                        # 容错回退：JSON 解析失败时保留 name/quota/desc，params 置空，不丢弃整个模型
-                        logger.warning(f"[NewImage] 模型 {name} 的参数JSON解析失败，已忽略: {raw_params}")
-                        parsed = None
-                    if isinstance(parsed, dict):
-                        # 先识别 sizes 键（模型允许分辨率限制），取出并从 params 中移除
-                        if "sizes" in parsed:
-                            sizes_raw = parsed.pop("sizes")
-                            if isinstance(sizes_raw, list) and sizes_raw == []:
-                                allowed_sizes = None  # 空数组视为不限制
-                            elif (isinstance(sizes_raw, list) and sizes_raw
-                                  and all(isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in sizes_raw)):
-                                allowed_sizes = list(dict.fromkeys(sizes_raw))  # 去重保序
-                            else:
-                                logger.warning(f"[NewImage] 模型 {name} 的 sizes 键非法，已忽略: {sizes_raw}")
-                        for pk, pv in parsed.items():
-                            if pk not in PARAM_SCHEMA:
-                                logger.warning(f"[NewImage] 模型 {name} 存在未知参数 {pk}，已忽略")
-                                continue
-                            ok, coerced = _coerce_param_value(pk, pv, clamp=False)
-                            if not ok:
-                                logger.warning(f"[NewImage] 模型 {name} 参数 {pk} 非法或越界，已丢弃")
-                                continue
-                            params[pk] = coerced
-            if name in seen:
-                continue  # 保留第一条的 quota/desc/params
-            seen.add(name)
-            self.available_models.append({"name": name, "quota": quota, "desc": desc, "params": params,
-                                          "allowed_sizes": allowed_sizes})
-            self.available_model_names.append(name)
+                    parsed = json.loads(raw_params)
+                except (ValueError, TypeError):
+                    # 容错回退：JSON 解析失败时保留 name/quota/desc，params 置空，不丢弃整个模型
+                    logger.warning(f"[NewImage] 模型 {name} 的参数JSON解析失败，已忽略: {raw_params}")
+                    parsed = None
+                if isinstance(parsed, dict):
+                    # 先识别 sizes 键（模型允许分辨率限制），取出并从 params 中移除
+                    if "sizes" in parsed:
+                        sizes_raw = parsed.pop("sizes")
+                        if isinstance(sizes_raw, list) and sizes_raw == []:
+                            allowed_sizes = None  # 空数组视为不限制
+                        elif (isinstance(sizes_raw, list) and sizes_raw
+                              and all(isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in sizes_raw)):
+                            allowed_sizes = list(dict.fromkeys(sizes_raw))  # 去重保序
+                        else:
+                            logger.warning(f"[NewImage] 模型 {name} 的 sizes 键非法，已忽略: {sizes_raw}")
+                    for pk, pv in parsed.items():
+                        if pk not in PARAM_SCHEMA:
+                            logger.warning(f"[NewImage] 模型 {name} 存在未知参数 {pk}，已忽略")
+                            continue
+                        ok, coerced = _coerce_param_value(pk, pv, clamp=False)
+                        if not ok:
+                            logger.warning(f"[NewImage] 模型 {name} 参数 {pk} 非法或越界，已丢弃")
+                            continue
+                        params[pk] = coerced
+        return {"name": name, "quota": quota, "desc": desc, "params": params,
+                "allowed_sizes": allowed_sizes}
+
+    def _parse_models_lines(self, lines: List[str]) -> List[Dict[str, Any]]:
+        """把模型行数组解析为模型 dict 列表（复用 _parse_model_line，去重保留顺序，重复名取第一条）。"""
+        result: List[Dict[str, Any]] = []
+        seen: set = set()
+        for line in lines:
+            entry = self._parse_model_line(line)
+            if not entry:
+                continue
+            if entry["name"] in seen:
+                continue
+            seen.add(entry["name"])
+            result.append(entry)
+        return result
+
+    def _serialize_models_lines(self, models: List[Any]) -> tuple:
+        """校验并序列化模型 dict 列表为行数组（格式：模型名;配额;说明;{参数JSON}）。
+
+        返回 (lines, error)：成功时 error 为 None；校验失败时 lines 为空列表、error 为错误消息。
+        校验规则与旧 _web_models_post 一致：name 非空、quota 整数 >=1、desc 半角分号转义全角、
+        params 经 _sanitize_params 温和清洗、allowed_sizes 仅 1K/2K/4K 或 null。
+        """
+        lines: List[str] = []
+        for m in models:
+            if not isinstance(m, dict):
+                return [], "models 元素必须是对象"
+            name = str(m.get("name", "")).strip()
+            if not name:
+                return [], "模型名不能为空"
+            try:
+                quota = int(m.get("quota", 1))
+            except (TypeError, ValueError):
+                return [], f"模型 {name} 的配额必须为整数"
+            if quota < 1:
+                return [], f"模型 {name} 的配额必须 >= 1"
+            # desc 中的半角分号转义为全角（防与模型行分隔符冲突），解析时还原（见 _parse_model_line）
+            desc = str(m.get("desc", "")).strip().replace(";", "；")
+            # 接受 params（dict），用 _sanitize_params 温和清洗（夹取/丢弃）后序列化为第 4 段 JSON
+            raw_params = m.get("params")
+            if raw_params is None:
+                params, _ = {}, []
+            else:
+                params, _ = self._sanitize_params(raw_params, "WebUI")
+            # 接受 allowed_sizes（List[str] 或 null；null/空数组 = 不限制，不写 sizes 键）
+            allowed_sizes = m.get("allowed_sizes")
+            if allowed_sizes is not None:
+                if not isinstance(allowed_sizes, list) or not all(
+                        isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in allowed_sizes):
+                    return [], f"模型 {name} 的 allowed_sizes 只能包含 1K/2K/4K 字符串数组或 null"
+                if allowed_sizes:
+                    params["sizes"] = list(dict.fromkeys(allowed_sizes))
+            if params:
+                params_json = json.dumps(params, ensure_ascii=False)
+                lines.append(f"{name};{quota};{desc};{params_json}")
+            elif desc:
+                lines.append(f"{name};{quota};{desc}")
+            else:
+                lines.append(f"{name};{quota}")
+        return lines, None
 
     def _get_model_entry(self, name: str) -> Optional[Dict]:
         """按模型名查 available_models（含 params），找不到返回 None。"""
@@ -1580,14 +1724,6 @@ class FigurineProPlugin(Star):
             presets = list(self.prompt_map.keys())
             return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
 
-    async def _get_api_key(self) -> str | None:
-        keys = self.conf.get("api_keys", [])
-        if not keys: return None
-        async with self.key_lock:
-            key = keys[self.key_index]
-            self.key_index = (self.key_index + 1) % len(keys)
-            return key
-
     def _extract_image_size(self, text: str, sender_id: str) -> tuple:
         """
         从用户输入中提取分辨率参数（仅白名单用户生效）。
@@ -1654,44 +1790,8 @@ class FigurineProPlugin(Star):
             - model_name: 本次实际使用的模型名（错误早退路径可能为 ""）
         """
         
-        # ========== 公共：确定 API URL、Key 和 模型 ==========
-        api_url: str = ""
-        api_key: str = ""
+        # ========== 模型选择优先级：model_override > 本群配置模型 > available_model_names[0] 兜底 ==========
         model_name: str = ""
-        
-        if self.provider_id:
-            self.provider = self.context.get_provider_by_id(self.provider_id)
-            if not self.provider:
-                logger.warning(f"[NewImage] 未找到提供商 '{self.provider_id}'，将尝试手动配置")
-            if self.provider:
-                try:
-                    config = self.provider.provider_config
-                    api_url = config.get("api_base", "")
-                    keys = self.provider.get_keys()
-                    if keys:
-                        api_key = keys[0]
-                    model_name = self.provider.get_model()
-                    if api_url:
-                        logger.info(f"[NewImage] 使用提供商 '{self.provider_id}'")
-                        logger.debug(f"  API URL: {api_url[:50]}...")
-                        logger.debug(f"  Model: {model_name}")
-                except Exception as e:
-                    logger.warning(f"从提供商获取配置失败: {e}，将尝试使用手动配置")
-                    api_url = api_key = model_name = ""
-        
-        if not api_url:
-            api_url_raw = (self.conf.get("api_url") or "").strip()
-            if not api_url_raw:
-                return "❌ 未选择提供商，且未配置手动 API URL", ""
-            api_url = api_url_raw
-            logger.info(f"[NewImage] 使用手动配置 API URL")
-        
-        if not api_key:
-            api_key = await self._get_api_key()
-            if not api_key:
-                return "❌ 未选择提供商，且未配置手动 API Key", ""
-        
-        # ========== 模型选择优先级：model_override > 本群配置模型 > provider 模型 > 手动 available_models[0] 兜底 ==========
         if model_override:
             # 0. LLM 工具指定模型（最高优先）
             model_name = model_override
@@ -1700,19 +1800,35 @@ class FigurineProPlugin(Star):
             # 1. 本群通过「切换模型」指令配置的模型
             model_name = self.group_models[group_id]
             logger.info(f"[NewImage] 使用本群 {group_id} 配置的模型: {model_name}")
-        elif not model_name:
-            # 2. provider 未提供模型（或未使用 provider）时，回退到手动配置
-            if self.available_model_names:
-                # 2a. 手动配置的默认模型（model 配置中第一个）
-                model_name = self.available_model_names[0]
-                logger.info(f"[NewImage] 使用手动配置的默认模型: {model_name}")
-            else:
-                # 2b. 兜底 conf.model（兼容初始化未完成等场景）
-                model_name = (self.conf.get("model", "") or "").strip()
-                if not model_name:
-                    return "❌ 未选择提供商，且未配置手动模型名称", ""
+        elif self.available_model_names:
+            # 2. 启用提供商中的默认模型（available_models 第一个）
+            model_name = self.available_model_names[0]
+            logger.info(f"[NewImage] 使用默认模型: {model_name}")
+        else:
+            # 3. 兜底 conf.model（兼容初始化未完成等场景）
+            model_name = (self.conf.get("model", "") or "").strip()
+            if not model_name:
+                return "❌ 未配置任何生图模型，请在 WebUI 提供商管理中配置", ""
 
-        source_info = f"提供商:{self.provider_id}" if (self.provider_id and self.provider) else "手动配置"
+        # ========== 按模型定位所属提供商，取 API 配置 ==========
+        provider = self._find_provider_for_model(model_name)
+        if not provider:
+            return f"❌ 模型 {model_name} 未关联任何提供商，请在 WebUI 提供商管理中配置", model_name
+        if not provider.get("enabled", True):
+            provider_name_dis = str(provider.get("name", "") or provider.get("id", "未命名"))
+            return f"❌ 模型 {model_name} 所属提供商「{provider_name_dis}」已停用，请在 WebUI 提供商管理中启用", model_name
+        api_url = str(provider.get("base_url", "") or "").strip()
+        api_key = str(provider.get("api_key", "") or "").strip()
+        provider_type = str(provider.get("type", "") or "openai").strip()
+        provider_name = str(provider.get("name", "") or provider.get("id", "未命名"))
+        if not api_url:
+            return f"❌ 提供商「{provider_name}」未配置 BaseURL，请在 WebUI 提供商管理中配置", model_name
+        if not api_key:
+            return f"❌ 提供商「{provider_name}」未配置 API Key，请在 WebUI 提供商管理中配置", model_name
+        logger.info(f"[NewImage] 使用提供商: {provider_name}（{provider_type}）")
+        logger.debug(f"  API URL: {api_url[:80]}...")
+
+        source_info = f"提供商:{provider_name}"
 
         # ========== 合并生成参数：显式 gen_params > 模型默认参数（按最终 model_name 取） ==========
         final_params = _merge_params(self._get_model_default_params(model_name), gen_params or {})
@@ -1737,8 +1853,8 @@ class FigurineProPlugin(Star):
                     logger.info(f"[NewImage] 模型 {model_name} 不支持分辨率 {effective_size}，"
                                 f"已自动调整为允许的最大分辨率 {max_avail}")
 
-        # ========== 根据开关选择路由 ==========
-        if self.is_gemini_api:
+        # ========== 按提供商 type 选择路由（novalai 暂按 openai 兼容路由处理） ==========
+        if provider_type == "gemini":
             return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                image_size, source_info, final_params), model_name
         else:
@@ -2056,8 +2172,14 @@ class FigurineProPlugin(Star):
         self._web_registered = True
         base = f"/{self.WEB_PLUGIN_NAME}"
         endpoints = [
-            (f"{base}/models", self._web_models_get, ["GET"], "获取可用模型列表（含配额/说明）"),
-            (f"{base}/models", self._web_models_post, ["POST"], "保存可用模型列表（含配额/说明）"),
+            (f"{base}/models", self._web_models_get, ["GET"], "获取可用模型列表（含配额/说明，兼容旧前端：返回第一个启用提供商）"),
+            (f"{base}/models", self._web_models_post, ["POST"], "保存可用模型列表（已迁移到提供商管理，返回引导错误）"),
+            (f"{base}/providers", self._web_providers_get, ["GET"], "获取提供商列表（API Key 掩码）"),
+            (f"{base}/providers", self._web_providers_post, ["POST"], "新增提供商"),
+            (f"{base}/providers/delete", self._web_providers_delete, ["POST"], "删除提供商（含其模型）"),
+            (f"{base}/providers/save", self._web_providers_save, ["POST"], "更新提供商配置（api_key 传空串表示不修改）"),
+            (f"{base}/providers/models", self._web_providers_models_get, ["GET"], "获取指定提供商的模型列表"),
+            (f"{base}/providers/models", self._web_providers_models_post, ["POST"], "保存指定提供商的模型列表"),
             (f"{base}/users", self._web_users_get, ["GET"], "获取用户次数列表（分页/搜索）"),
             (f"{base}/users/add", self._web_users_add, ["POST"], "增加用户次数（不受上限限制）"),
             (f"{base}/users/set", self._web_users_set, ["POST"], "设置用户次数为指定值（0 或任意非负整数）"),
@@ -2084,69 +2206,198 @@ class FigurineProPlugin(Star):
         return None
 
     async def _web_models_get(self):
+        """兼容旧前端：返回第一个启用提供商的模型列表（未迁移的旧面板仍可读）。"""
         if (resp := self._web_require_login()):
             return resp
         try:
+            target = next((p for p in self.providers if p.get("enabled", True)), None)
+            if not target:
+                return json_response({"models": []})
             models = [
-                {"name": m["name"], "quota": int(m["quota"]), "desc": str(m.get("desc", "")),
+                {"name": m["name"], "quota": int(m.get("quota", 1)), "desc": str(m.get("desc", "") or ""),
                  "params": dict(m.get("params") or {}),
                  "allowed_sizes": m.get("allowed_sizes")}
-                for m in self.available_models
+                for m in (target.get("models") or [])
+                if isinstance(m, dict) and m.get("name")
             ]
             return json_response({"models": models})
         except Exception as e:
             return error_response(str(e))
 
     async def _web_models_post(self):
+        """模型管理已迁移到提供商管理：旧 POST /models 直接返回引导错误，避免误写旧 conf.model。"""
+        if (resp := self._web_require_login()):
+            return resp
+        return error_response("模型管理已迁移到提供商管理，请使用 /providers/models 接口")
+
+    # ---------- 多提供商管理 Web API ----------
+
+    async def _web_providers_get(self):
+        """GET {base}/providers：返回提供商列表（API Key 掩码 + 模型数）。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            providers = []
+            for p in self.providers:
+                providers.append({
+                    "id": p.get("id", ""),
+                    "name": p.get("name", ""),
+                    "type": p.get("type", ""),
+                    "api_key_masked": self._mask_api_key(p.get("api_key", "")),
+                    "base_url": p.get("base_url", ""),
+                    "enabled": bool(p.get("enabled", True)),
+                    "model_count": len(p.get("models") or []),
+                })
+            return json_response({"providers": providers})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_providers_post(self):
+        """POST {base}/providers：新增提供商。body {name,type,api_key,base_url}。"""
         if (resp := self._web_require_login()):
             return resp
         try:
             payload = await request.json(default={})
             if not isinstance(payload, dict):
                 return error_response("请求体必须是 JSON 对象")
+            name = str(payload.get("name", "") or "").strip()
+            if not name:
+                return error_response("提供商名称不能为空")
+            ptype = str(payload.get("type", "") or "").strip()
+            if ptype not in ("gemini", "openai", "novalai"):
+                return error_response("type 必须是 gemini/openai/novalai 之一")
+            api_key = str(payload.get("api_key", "") or "").strip()
+            if not api_key:
+                return error_response("API Key 不能为空")
+            base_url = str(payload.get("base_url", "") or "").strip()
+            if not base_url:
+                return error_response("BaseURL 不能为空")
+            provider = {
+                "id": self._new_provider_id(),
+                "name": name,
+                "type": ptype,
+                "api_key": api_key,
+                "base_url": base_url,
+                "enabled": True,
+                "models": [],
+            }
+            self.providers.append(provider)
+            await self._save_providers()
+            await self._load_providers()
+            return json_response({"ok": True, "id": provider["id"]})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_providers_delete(self):
+        """POST {base}/providers/delete：删除提供商（其下模型一并删除）。body {id}。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            pid = str(payload.get("id", "") or "").strip()
+            if not pid:
+                return error_response("id 不能为空")
+            before = len(self.providers)
+            self.providers = [p for p in self.providers if p.get("id") != pid]
+            if len(self.providers) == before:
+                return error_response("未找到该提供商")
+            await self._save_providers()
+            await self._load_providers()
+            return json_response({"ok": True})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_providers_save(self):
+        """POST {base}/providers/save：更新提供商配置。body {id,name,api_key,base_url,enabled}。
+
+        api_key 传空串表示不修改（保留原值）；name/base_url/enabled 可选。
+        """
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            pid = str(payload.get("id", "") or "").strip()
+            if not pid:
+                return error_response("id 不能为空")
+            target = next((p for p in self.providers if p.get("id") == pid), None)
+            if not target:
+                return error_response("未找到该提供商")
+            if "name" in payload:
+                name = str(payload.get("name", "") or "").strip()
+                if not name:
+                    return error_response("提供商名称不能为空")
+                target["name"] = name
+            if "type" in payload:
+                ptype = str(payload.get("type", "") or "").strip()
+                if ptype not in ("gemini", "openai", "novalai"):
+                    return error_response("type 必须是 gemini/openai/novalai 之一")
+                target["type"] = ptype
+            if "base_url" in payload:
+                base_url = str(payload.get("base_url", "") or "").strip()
+                if not base_url:
+                    return error_response("BaseURL 不能为空")
+                target["base_url"] = base_url
+            if "api_key" in payload:
+                api_key = str(payload.get("api_key", "") or "").strip()
+                if api_key:  # 传空串表示不修改，保留原值
+                    target["api_key"] = api_key
+            if "enabled" in payload:
+                target["enabled"] = bool(payload.get("enabled"))
+            await self._save_providers()
+            await self._load_providers()
+            return json_response({"ok": True})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_providers_models_get(self):
+        """GET {base}/providers/models?provider={id}：返回该提供商模型数组。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            pid = (request.query.get("provider", "") or "").strip()
+            target = next((p for p in self.providers if p.get("id") == pid), None)
+            if not target:
+                return error_response("未找到该提供商")
+            models = [
+                {"name": m["name"], "quota": int(m.get("quota", 1)), "desc": str(m.get("desc", "") or ""),
+                 "params": dict(m.get("params") or {}),
+                 "allowed_sizes": m.get("allowed_sizes")}
+                for m in (target.get("models") or [])
+                if isinstance(m, dict) and m.get("name")
+            ]
+            return json_response({"models": models})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_providers_models_post(self):
+        """POST {base}/providers/models：保存该提供商模型。body {provider:id, models:[...]}。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            pid = str(payload.get("provider", "") or "").strip()
+            if not pid:
+                return error_response("provider 不能为空")
+            target = next((p for p in self.providers if p.get("id") == pid), None)
+            if not target:
+                return error_response("未找到该提供商")
             models = payload.get("models")
             if not isinstance(models, list):
                 return error_response("models 必须是数组")
-            lines = []
-            for m in models:
-                if not isinstance(m, dict):
-                    return error_response("models 元素必须是对象")
-                name = str(m.get("name", "")).strip()
-                if not name:
-                    return error_response("模型名不能为空")
-                try:
-                    quota = int(m.get("quota", 1))
-                except (TypeError, ValueError):
-                    return error_response(f"模型 {name} 的配额必须为整数")
-                if quota < 1:
-                    return error_response(f"模型 {name} 的配额必须 >= 1")
-                # desc 中的半角分号转义为全角（防与模型行分隔符冲突），解析时还原（见 _parse_available_models）
-                desc = str(m.get("desc", "")).strip().replace(";", "；")
-                # 接受 params（dict），用 _sanitize_params 温和清洗（夹取/丢弃）后序列化为第 4 段 JSON
-                raw_params = m.get("params")
-                if raw_params is None:
-                    params, _ = {}, []
-                else:
-                    params, _ = self._sanitize_params(raw_params, "WebUI")
-                # 接受 allowed_sizes（List[str] 或 null；null/空数组 = 不限制，不写 sizes 键）
-                allowed_sizes = m.get("allowed_sizes")
-                if allowed_sizes is not None:
-                    if not isinstance(allowed_sizes, list) or not all(
-                            isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in allowed_sizes):
-                        return error_response(f"模型 {name} 的 allowed_sizes 只能包含 1K/2K/4K 字符串数组或 null")
-                    if allowed_sizes:
-                        params["sizes"] = list(dict.fromkeys(allowed_sizes))
-                if params:
-                    params_json = json.dumps(params, ensure_ascii=False)
-                    lines.append(f"{name};{quota};{desc};{params_json}")
-                elif desc:
-                    lines.append(f"{name};{quota};{desc}")
-                else:
-                    lines.append(f"{name};{quota}")
-            # AstrBotConfig(dict) 无 set 方法：dict 赋值 + save_config_async 原子落盘
-            await self.conf.save_config_async({"model": "\n".join(lines)})
-            self._parse_available_models()
-            return json_response({"ok": True, "count": len(lines)})
+            # 复用旧 /models 的校验/序列化逻辑（抽成公共方法），经行格式 round-trip 后落盘 dict
+            lines, err = self._serialize_models_lines(models)
+            if err:
+                return error_response(err)
+            target["models"] = self._parse_models_lines(lines)
+            await self._save_providers()
+            await self._load_providers()
+            return json_response({"ok": True, "count": len(target["models"])})
         except Exception as e:
             return error_response(str(e))
 

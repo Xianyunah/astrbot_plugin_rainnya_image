@@ -61,9 +61,31 @@
   async function apiPost(endpoint, body) { return await bridge.apiPost(endpoint, body || {}); }
 
   /* ============================================================
-   * Tab 1 · 模型管理
+   * Tab 1 · 提供商管理
    * ============================================================ */
+  var providersData = [];    // [{id, name, type, api_key_masked, base_url, enabled, model_count}]
+  var providerView = "list"; // "list" | "detail"
+  var currentProviderId = null;
   var modelsData = []; // [{name, quota, desc, params:{}, allowed_sizes:null|[]}]
+
+  var TYPE_META = {
+    gemini:  { label: "Gemini",  cls: "type-gemini"  },
+    openai:  { label: "OpenAI",  cls: "type-openai"  },
+    novalai: { label: "NovalAI", cls: "type-novalai" },
+  };
+  /* 模板默认 BaseURL（用户可改，选择模板时若字段为空则预填） */
+  var PROVIDER_TEMPLATES = {
+    gemini:  { base_url: "https://generativelanguage.googleapis.com" },
+    openai:  { base_url: "https://api.openai.com/v1" },
+    novalai: { base_url: "https://api.novalai.io/v1" },
+  };
+  function typeMeta(t) { return TYPE_META[t] || { label: String(t || "?").toUpperCase(), cls: "" }; }
+  function maskKey(k) {
+    var s = String(k || "");
+    if (!s) return "未设置";
+    if (s.length <= 8) return s.slice(0, 2) + "****";
+    return s.slice(0, 4) + "…" + s.slice(-4);
+  }
   var SIZE_OPTIONS = [
     { label: "不限制", value: "" },
     { label: "仅 1K", value: "1K" },
@@ -153,9 +175,9 @@
     return { ok: ok, models: out };
   }
 
-  async function loadModels() {
+  async function loadProviderModels(providerId) {
     try {
-      var data = await apiGet("models");
+      var data = await apiGet("providers/models", { provider: providerId });
       modelsData = (data && data.models) || [];
       renderModels();
       el("modelsNote").textContent = "已加载 " + modelsData.length + " 个模型";
@@ -166,18 +188,257 @@
     }
   }
 
-  async function saveModels() {
+  async function saveProviderModels() {
+    if (currentProviderId == null) return;
     var r = collectModels();
     if (!r.ok) { toast("模型信息不合法：请检查模型名非空、参数 JSON 合法", "error"); return; }
     var btn = el("btnModelsSave");
     btn.disabled = true;
     try {
-      var res = await apiPost("models", { models: r.models });
+      var res = await apiPost("providers/models", { provider: currentProviderId, models: r.models });
       modelsData = r.models;
       renderModels();
       toast("已保存 " + (res && res.count != null ? res.count : r.models.length) + " 个模型", "success");
     } catch (e) {
       toast("保存失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ---- 提供商列表视图 ---- */
+  function showProvidersView() {
+    providerView = "list";
+    el("providersView").hidden = false;
+    el("providerDetailView").hidden = true;
+  }
+  function showDetailView() {
+    providerView = "detail";
+    el("providersView").hidden = true;
+    el("providerDetailView").hidden = false;
+  }
+
+  function renderProviders() {
+    var wrap = el("providersList");
+    if (!providersData.length) {
+      wrap.innerHTML =
+        '<div class="empty">' +
+        '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>' +
+        '<span class="empty-main">暂无提供商，点击「+ 添加提供商」</span></div>';
+      return;
+    }
+    wrap.innerHTML = providersData.map(function (p) {
+      var tm = typeMeta(p.type);
+      return (
+        '<article class="provider-card" data-id="' + esc(p.id) + '">' +
+        '<div class="provider-card-head">' +
+        '<div class="provider-card-title">' +
+        '<span class="type-badge ' + tm.cls + '">' + tm.label + "</span>" +
+        '<b class="provider-name">' + esc(p.name) + "</b>" +
+        "</div>" +
+        '<input type="checkbox" class="switch" data-act="toggle" title="启用 / 停用" aria-label="启用开关"' +
+        (p.enabled ? " checked" : "") + ">" +
+        "</div>" +
+        '<div class="provider-meta">' +
+        '<span class="pm-item"><span class="pm-k">API Key</span><code>' + esc(p.api_key_masked || maskKey("")) + "</code></span>" +
+        '<span class="pm-item"><span class="pm-k">BaseURL</span><code class="pm-url">' + esc(p.base_url || "—") + "</code></span>" +
+        "</div>" +
+        '<div class="provider-card-foot">' +
+        '<span class="badge neutral">' + esc(p.model_count != null ? p.model_count : 0) + " 个模型</span>" +
+        '<div class="provider-actions">' +
+        '<button type="button" class="btn btn-ghost btn-sm" data-act="models">管理模型</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm" data-act="edit">编辑</button>' +
+        '<button type="button" class="btn btn-danger btn-sm" data-act="del">删除</button>' +
+        "</div></div></article>"
+      );
+    }).join("");
+  }
+
+  async function loadProviders() {
+    try {
+      var data = await apiGet("providers");
+      providersData = (data && data.providers) || [];
+      renderProviders();
+    } catch (e) {
+      toast("加载提供商失败：" + e.message, "error");
+      el("providersList").innerHTML =
+        '<div class="empty"><span class="empty-main">加载失败：' + esc(e.message) + "</span></div>";
+    }
+  }
+
+  /* ---- 提供商详情视图 ---- */
+  async function openProvider(id) {
+    currentProviderId = id;
+    var p = null;
+    for (var i = 0; i < providersData.length; i++) {
+      if (String(providersData[i].id) === String(id)) { p = providersData[i]; break; }
+    }
+    if (!p) { toast("找不到该提供商", "error"); return; }
+    var tm = typeMeta(p.type);
+    el("pdTitle").textContent = p.name || "提供商详情";
+    el("pdTypeBadge").textContent = tm.label;
+    el("pdTypeBadge").className = "type-badge " + tm.cls;
+    el("pdName").value = p.name || "";
+    el("pdApiKey").value = ""; // 留空 = 不修改
+    el("pdBaseUrl").value = p.base_url || "";
+    el("pdEnabled").checked = !!p.enabled;
+    showDetailView();
+    await loadProviderModels(id);
+  }
+
+  function backToProviders() {
+    currentProviderId = null;
+    showProvidersView();
+    loadProviders(); // 刷新模型数等
+  }
+
+  async function saveProviderConfig() {
+    if (currentProviderId == null) return;
+    var name = el("pdName").value.trim();
+    if (!name) {
+      el("pdName").classList.add("invalid");
+      toast("请填写提供商名字", "error");
+      return;
+    }
+    var key = el("pdApiKey").value.trim();
+    var url = el("pdBaseUrl").value.trim();
+    var btn = el("btnProviderCfgSave");
+    btn.disabled = true;
+    try {
+      await apiPost("providers/save", {
+        id: currentProviderId, name: name, api_key: key, base_url: url,
+        enabled: el("pdEnabled").checked,
+      });
+      el("pdApiKey").value = ""; // 已提交，清空掩码输入
+      el("pdTitle").textContent = name;
+      toast("提供商配置已保存", "success");
+      await loadProviders(); // 同步列表数据
+    } catch (e) {
+      toast("保存失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function toggleProvider(p, next) {
+    var prev = !!p.enabled;
+    p.enabled = next;
+    renderProviders();
+    try {
+      await apiPost("providers/save", {
+        id: p.id, name: p.name || "", api_key: "", base_url: p.base_url || "",
+        enabled: next,
+      });
+      toast("提供商「" + p.name + "」已" + (next ? "启用" : "停用"), "success");
+    } catch (e) {
+      p.enabled = prev; // 失败回滚
+      renderProviders();
+      toast("切换失败：" + e.message, "error");
+    }
+  }
+
+  async function deleteProvider(id) {
+    var p = null;
+    for (var i = 0; i < providersData.length; i++) {
+      if (String(providersData[i].id) === String(id)) { p = providersData[i]; break; }
+    }
+    if (!p) return;
+    if (!confirm("确认删除提供商「" + p.name + "」？其下所有模型配置将一并删除。")) return;
+    try {
+      await apiPost("providers/delete", { id: id });
+      toast("已删除提供商「" + p.name + "」", "success");
+      if (String(currentProviderId) === String(id)) {
+        currentProviderId = null;
+        showProvidersView();
+      }
+      await loadProviders();
+    } catch (e) {
+      toast("删除失败：" + e.message, "error");
+    }
+  }
+
+  /* ---- 添加 / 编辑提供商弹层 ---- */
+  var providerModalMode = "add"; // "add" | "edit"
+  var editProviderId = null;
+  var selectedTemplateType = "gemini";
+
+  function showAddProvider() {
+    providerModalMode = "add";
+    editProviderId = null;
+    el("providerModalTitle").textContent = "添加提供商";
+    el("templatePick").hidden = false;
+    el("provEnabledField").hidden = true;
+    el("provName").value = "";
+    el("provKey").value = "";
+    el("provUrl").value = "";
+    el("provName").classList.remove("invalid");
+    el("provKey").classList.remove("invalid");
+    selectTemplate("gemini");
+    openModal("providerModal");
+    setTimeout(function () { el("provName").focus(); }, 30);
+  }
+
+  function showEditProvider(id) {
+    var p = null;
+    for (var i = 0; i < providersData.length; i++) {
+      if (String(providersData[i].id) === String(id)) { p = providersData[i]; break; }
+    }
+    if (!p) { toast("找不到该提供商", "error"); return; }
+    providerModalMode = "edit";
+    editProviderId = id;
+    el("providerModalTitle").textContent = "编辑提供商";
+    el("templatePick").hidden = true;
+    el("provEnabledField").hidden = false;
+    el("provName").value = p.name || "";
+    el("provKey").value = ""; // 留空 = 不修改
+    el("provUrl").value = p.base_url || "";
+    el("provEnabled").checked = !!p.enabled;
+    el("provName").classList.remove("invalid");
+    el("provKey").classList.remove("invalid");
+    openModal("providerModal");
+    setTimeout(function () { el("provName").focus(); }, 30);
+  }
+
+  function selectTemplate(type) {
+    selectedTemplateType = type;
+    el("templateRow").querySelectorAll(".template-card").forEach(function (c) {
+      c.classList.toggle("is-selected", c.getAttribute("data-type") === type);
+    });
+    // 预填默认 BaseURL（仅当字段为空，避免覆盖用户输入）
+    var tpl = PROVIDER_TEMPLATES[type];
+    if (tpl && tpl.base_url && !el("provUrl").value.trim()) {
+      el("provUrl").value = tpl.base_url;
+    }
+  }
+
+  async function saveProviderFromModal() {
+    var name = el("provName").value.trim();
+    if (!name) {
+      el("provName").classList.add("invalid");
+      toast("请填写提供商名字", "error");
+      return;
+    }
+    var key = el("provKey").value.trim();
+    var url = el("provUrl").value.trim();
+    var btn = el("providerSave");
+    btn.disabled = true;
+    try {
+      if (providerModalMode === "edit") {
+        await apiPost("providers/save", {
+          id: editProviderId, name: name, api_key: key, base_url: url,
+          enabled: el("provEnabled").checked,
+        });
+        toast("提供商「" + name + "」已更新", "success");
+      } else {
+        await apiPost("providers", {
+          name: name, type: selectedTemplateType, api_key: key, base_url: url,
+        });
+        toast("已添加提供商「" + name + "」", "success");
+      }
+      closeModal("providerModal");
+      await loadProviders();
+    } catch (e) {
+      toast((providerModalMode === "edit" ? "更新" : "添加") + "失败：" + e.message, "error");
     } finally {
       btn.disabled = false;
     }
@@ -574,7 +835,7 @@
   /* ============================================================
    * 导航 / 事件绑定
    * ============================================================ */
-  var PAGE_TITLES = { models: "模型管理", counts: "次数管理", logs: "生图日志", settings: "基础设置" };
+  var PAGE_TITLES = { models: "提供商管理", counts: "次数管理", logs: "生图日志", settings: "基础设置" };
   var CURRENT = "models";
 
   function switchPage(name) {
@@ -591,7 +852,13 @@
   }
 
   function refreshCurrent() {
-    if (CURRENT === "models") loadModels();
+    if (CURRENT === "models") {
+      if (providerView === "detail" && currentProviderId != null) {
+        openProvider(currentProviderId);
+      } else {
+        loadProviders();
+      }
+    }
     else if (CURRENT === "counts") loadCounts(true);
     else if (CURRENT === "logs") loadLogs(true);
     else if (CURRENT === "settings") loadConfig();
@@ -600,21 +867,61 @@
   function bindEvents() {
     /* 导航 */
     document.querySelectorAll(".nav-item").forEach(function (b) {
-      b.addEventListener("click", function () { switchPage(b.getAttribute("data-nav")); });
+      b.addEventListener("click", function () {
+        switchPage(b.getAttribute("data-nav"));
+        // 切页后立即触发对应页加载（修复首次打开一直「加载中」直到手动刷新的问题）
+        refreshCurrent();
+      });
     });
     el("btnRefresh").addEventListener("click", refreshCurrent);
 
-    /* 模型 */
+    /* 提供商 */
+    el("btnAddProvider").addEventListener("click", showAddProvider);
+    el("btnBackProviders").addEventListener("click", backToProviders);
+    el("btnDeleteProvider").addEventListener("click", function () {
+      if (currentProviderId != null) deleteProvider(currentProviderId);
+    });
+    el("btnProviderCfgSave").addEventListener("click", saveProviderConfig);
+    el("providersList").addEventListener("click", function (e) {
+      var card = e.target.closest(".provider-card");
+      if (!card) return;
+      var id = card.getAttribute("data-id");
+      var actBtn = e.target.closest("[data-act]");
+      if (actBtn) {
+        var act = actBtn.getAttribute("data-act");
+        if (act === "models") openProvider(id);
+        else if (act === "edit") showEditProvider(id);
+        else if (act === "del") deleteProvider(id);
+        return; // toggle 开关走 change 事件，不进入详情
+      }
+      // 点卡片空白处也进入详情
+      openProvider(id);
+    });
+    el("providersList").addEventListener("change", function (e) {
+      var sw = e.target.closest('[data-act="toggle"]');
+      if (!sw) return;
+      var card = e.target.closest(".provider-card");
+      if (!card) return;
+      var id = card.getAttribute("data-id");
+      var p = null;
+      for (var i = 0; i < providersData.length; i++) {
+        if (String(providersData[i].id) === String(id)) { p = providersData[i]; break; }
+      }
+      if (p) toggleProvider(p, sw.checked);
+    });
+
+    /* 模型（详情视图内，按当前提供商） */
     el("btnModelsAdd").addEventListener("click", function () {
       modelsData.push({ name: "", quota: 1, desc: "", params: {}, allowed_sizes: null });
       renderModels();
       var last = el("modelsBody").querySelector('tr[data-i="' + (modelsData.length - 1) + '"]');
       if (last) { var nm = last.querySelector('[data-k="name"]'); if (nm) nm.focus(); }
     });
-    el("btnModelsSave").addEventListener("click", saveModels);
+    el("btnModelsSave").addEventListener("click", saveProviderModels);
     el("btnModelsReset").addEventListener("click", function () {
-      loadModels();
-      toast("已重置为后端当前模型", "info");
+      if (currentProviderId == null) return;
+      loadProviderModels(currentProviderId);
+      toast("已重置为该提供商当前模型", "info");
     });
     el("modelsBody").addEventListener("click", function (e) {
       var btn = e.target.closest("[data-act='del']");
@@ -626,6 +933,16 @@
       if (name && !confirm("确认删除模型「" + name + "」？（未保存前不生效）")) return;
       modelsData.splice(i, 1);
       renderModels();
+    });
+
+    /* 添加/编辑提供商弹层 */
+    el("providerClose").addEventListener("click", function () { closeModal("providerModal"); });
+    el("providerCancel").addEventListener("click", function () { closeModal("providerModal"); });
+    el("providerSave").addEventListener("click", saveProviderFromModal);
+    el("templateRow").addEventListener("click", function (e) {
+      var c = e.target.closest(".template-card");
+      if (!c) return;
+      selectTemplate(c.getAttribute("data-type"));
     });
 
     /* 次数 */
@@ -700,11 +1017,12 @@
     /* Esc 关闭弹层 / 遮罩点击关闭 */
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
+        if (!el("providerModal").hidden) closeModal("providerModal");
         if (!el("rechargeModal").hidden) closeModal("rechargeModal");
         if (!el("viewModal").hidden) closeModal("viewModal");
       }
     });
-    ["rechargeModal", "viewModal"].forEach(function (id) {
+    ["providerModal", "rechargeModal", "viewModal"].forEach(function (id) {
       el(id).addEventListener("click", function (e) {
         if (e.target === el(id)) closeModal(id);
       });
@@ -739,12 +1057,12 @@
       // bridge 未注入/未就绪：给出明确提示（需在 Dashboard 登录后打开本页）
       toast("请在 Dashboard 登录后打开本页", "error");
       switchPage("models");
-      el("modelsBody").innerHTML =
-        '<tr class="row-empty"><td colspan="6"><div class="empty"><span class="empty-main">Bridge 未就绪，请在 Dashboard 登录后打开本页</span></div></td></tr>';
+      el("providersList").innerHTML =
+        '<div class="empty"><span class="empty-main">Bridge 未就绪，请在 Dashboard 登录后打开本页</span></div>';
       return;
     }
     switchPage("models");
-    loadModels();
+    loadProviders();
     loadGroupOptions();
   }
 
