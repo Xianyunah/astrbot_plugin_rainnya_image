@@ -1,6 +1,23 @@
 name: astrbot_plugin_rainnya_image
 display_name: RainnyaImage 全OpenAI兼容画图
-desc: AI生图插件：支持图生图(手办化/Q版化等40+预设)、文生图、自定义Prompt，支持Gemini原生API与OpenAI兼容双路由，含安全过滤、高分辨率白名单、用户/群组次数限制与每日签到系统
+desc: AI生图插件：多提供商架构(WebUI添加Gemini/OpenAI/NovelAI)，支持图生图(手办化/Q版化等40+预设)、文生图、自定义Prompt，Gemini原生API与OpenAI兼容双路由，含NovelAI官方/反代双协议、画师串预设、打标/画师推荐/自拍LLM工具、用户/群组次数限制与每日签到系统
 version: v1.1.9
 author: xianyunah
 repo: https://github.com/Xianyunah/astrbot_plugin_rainnya_image
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - gewechat
+  - discord
+tags:
+  - 生图
+  - AI绘画
+  - NovelAI
+  - 文生图
+  - 图生图
+  - 画师串
+  - LLM工具
+  - WebUI
+  - 多提供商
