@@ -214,7 +214,7 @@ def _merge_params(*dicts: Optional[Dict]) -> Dict:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.1.8",
+    "1.1.9",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
