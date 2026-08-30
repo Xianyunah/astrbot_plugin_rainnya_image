@@ -1161,7 +1161,7 @@ class FigurineProPlugin(Star):
             msg += "🎨 自定义图生图：\n"
             msg += "bnn <你的绘画想法>（可一次带多张图）\n\n"
             msg += "🎁 次数与签到：\n"
-            msg += "发送「辉宝赐福」—— 每日签到领次数\n"
+            msg += "发送「喵喵赐福」—— 每日签到领次数\n"
             msg += ">>生图查询次数 —— 查询剩余次数\n\n"
             msg += "👑 管理员：\n"
             msg += ">>切换模型 <序号> —— 按群切换生图模型\n"
@@ -1249,17 +1249,17 @@ class FigurineProPlugin(Star):
             if user_limit_on and group_limit_on:
                 if user_count < quota and group_count < quota:
                     return (f"❌ 本群次数与您的个人次数均不足以生成（需 {quota} 次，"
-                            f"个人剩 {user_count}，群剩 {group_count}）。\n请使用「辉宝赐福」获取次数。")
+                            f"个人剩 {user_count}，群剩 {group_count}）。\n请使用「喵喵赐福」获取次数。")
             elif user_limit_on and user_count < quota:
                 # 只开启用户限制，用户次数不足
-                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「辉宝赐福」获取次数。"
+                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「喵喵赐福」获取次数。"
             elif group_limit_on and group_count < quota:
                 # 只开启群组限制，群组次数不足
                 return f"❌ 本群次数不足（需 {quota} 次，当前剩余 {group_count}）。\n请联系管理员增加群组次数。"
         else:
             # 私聊：只检查用户限制
             if user_limit_on and user_count < quota:
-                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「辉宝赐福」获取次数。"
+                return f"❌ 您的次数不足（需 {quota} 次，当前剩余 {user_count}）。\n请使用「喵喵赐福」获取次数。"
         return None
 
     async def _consume_quota(self, sender_id: str, group_id: Optional[str], count: int = 1) -> str:
@@ -1428,16 +1428,16 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"[NewImage] 撤回日志消息失败: {e}", exc_info=True)
 
-    @filter.regex(r"^[#/!！]?辉宝赐福\s*$")
+    @filter.regex(r"^[#/!！]?喵喵赐福\s*$")
     async def on_checkin(self, event: AstrMessageEvent):
-        """每日签到获取生图次数 - 支持直接发送"辉宝赐福"触发"""
+        """每日签到获取生图次数 - 支持直接发送"喵喵赐福"触发"""
         if not self.conf.get("enable_checkin", False):
-            yield event.plain_result("📅 本机器人未开启辉宝赐福功能。")
+            yield event.plain_result("📅 本机器人未开启喵喵赐福功能。")
             return
         user_id = event.get_sender_id()
         today_str = datetime.now().strftime("%Y-%m-%d")
         if self.user_checkin_data.get(user_id) == today_str:
-            yield event.plain_result(f"您今天已经领取过辉宝赐福。\n剩余次数: {self._get_user_count(user_id)}")
+            yield event.plain_result(f"您今天已经领取过喵喵赐福。\n剩余次数: {self._get_user_count(user_id)}")
             return
         # 检查是否已达到持有上限
         # 用 _counts_lock 包裹「读-判-写-盘」，保证签到并发下 user_counts 修改原子
@@ -1462,14 +1462,14 @@ class FigurineProPlugin(Star):
                 await self._save_user_counts()
                 self.user_checkin_data[user_id] = today_str
                 await self._save_user_checkin_data()
-                yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {actual_reward} 次（已达上限 {self.user_count_cap}），当前生图剩余: {new_count} 次。")
+                yield event.plain_result(f"🎉 喵喵赐福成功！获得大香蕉生图 {actual_reward} 次（已达上限 {self.user_count_cap}），当前生图剩余: {new_count} 次。")
             else:
                 self.user_counts[user_id] = new_count
                 await self._save_user_counts()
                 self.user_checkin_data[user_id] = today_str
                 await self._save_user_checkin_data()
                 cap_info = f"（上限 {self.user_count_cap}）" if self.user_count_cap > 0 else ""
-                yield event.plain_result(f"🎉 辉宝赐福成功！获得大香蕉生图 {reward} 次，当前生图剩余: {new_count}{cap_info} 次。")
+                yield event.plain_result(f"🎉 喵喵赐福成功！获得大香蕉生图 {reward} 次，当前生图剩余: {new_count}{cap_info} 次。")
 
     @filter.command("生图增加用户次数", prefix_optional=True)
     async def on_add_user_counts(self, event: AstrMessageEvent):
