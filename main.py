@@ -3,6 +3,7 @@ import base64
 import functools
 import io
 import json
+import os
 import random
 import re
 import shutil
@@ -19,7 +20,7 @@ from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core import AstrBotConfig
-from astrbot.core.message.components import At, Image, Plain, Reply
+from astrbot.core.message.components import At, File, Image, Plain, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .image_parser import extract_image_bytes_from_response
@@ -106,6 +107,115 @@ NOVALAI_IMG2IMG_STRENGTH = 0.7
 NOVALAI_IMG2IMG_NOISE = 0.2
 NOVALAI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
+
+# ========== NSFW 加密 ZIP（generate_image 工具 nsfw=true 用） ==========
+NSFW_ZIP_PASSWORD = "nsfwmiaomiao"   # NSFW 加密 ZIP 解压密码（硬编码，不配置、不暴露在 WebUI）
+NSFW_ZIP_ENTRY = "image.png"         # ZIP 内图片条目名
+NSFW_ZIP_CACHE_DIR = "nsfw_cache"    # 插件数据目录下的缓存子目录
+
+
+# Python 3.14 起标准库 zipfile 已移除写加密支持（setpassword 写入不产生加密条目），
+# 而 AStrBot 运行时的 Python 版本较新，故这里用纯 Python 实现传统 ZipCrypto（PKWARE）加密，
+# 兼容所有版本 Python（生成的 ZIP 可被主流解压软件用密码解压）。
+def _gen_zipcrypto_crctable():
+    table = []
+    for i in range(256):
+        crc = i
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+        table.append(crc & 0xFFFFFFFF)
+    return table
+
+
+_ZIPCRYPTO_CRC_TABLE = _gen_zipcrypto_crctable()
+
+
+def _zipcrypto_encrypt_data(data: bytes, password: bytes, crc32_value: int) -> bytes:
+    """ZipCrypto（传统 PKWARE）加密压缩数据：前置 12 字节加密头（第 12 字节=CRC 高 8 位校验）后接密文。"""
+    table = _ZIPCRYPTO_CRC_TABLE
+
+    def _crc32_byte(ch, crc):
+        return (crc >> 8) ^ table[(crc ^ ch) & 0xFF]
+
+    keys = [305419896, 591751049, 878082192]  # 0x12345678 / 0x23456789 / 0x34567890
+
+    def _update_keys(c):
+        keys[0] = _crc32_byte(c, keys[0])
+        keys[1] = (keys[1] + (keys[0] & 0xFF)) & 0xFFFFFFFF
+        keys[1] = (keys[1] * 134775813 + 1) & 0xFFFFFFFF
+        keys[2] = _crc32_byte((keys[1] >> 24) & 0xFF, keys[2])
+
+    def _decrypt_byte():
+        temp = keys[2] | 2
+        return ((temp * (temp ^ 1)) >> 8) & 0xFF
+
+    for b in password:
+        _update_keys(b)
+    # 12 字节加密头：前 11 字节随机，第 12 字节 = CRC 高 8 位（解压器据此校验密码）
+    # 注意：与解密方对称，密钥用「明文」字节更新
+    check_byte = (crc32_value >> 24) & 0xFF
+    header = bytearray(12)
+    for i in range(12):
+        plain = os.urandom(1)[0] if i < 11 else check_byte
+        header[i] = plain ^ _decrypt_byte()
+        _update_keys(plain)
+    # 加密压缩数据流
+    cipher = bytearray(len(data))
+    for i, d in enumerate(data):
+        cipher[i] = d ^ _decrypt_byte()
+        _update_keys(d)
+    return bytes(header) + bytes(cipher)
+
+
+def _apply_zipcrypto_encryption(zip_bytes: bytes, password: bytes) -> bytes:
+    """把 stdlib 生成的「单条目、无 data descriptor」ZIP 改为 ZipCrypto 密码加密。
+
+    步骤：置位加密标志(bit 0) → 加密压缩数据(前置 12 字节头) → 修正本地头/中央目录压缩尺寸与中央目录偏移。
+    仅适用于单条目小文件 ZIP（NSFW 生图场景）。
+    """
+    data = bytearray(zip_bytes)
+    if data[0:4] != b"PK\x03\x04":
+        raise ValueError("非法 ZIP：缺少本地文件头")
+    name_len = int.from_bytes(data[26:28], "little")
+    extra_len = int.from_bytes(data[28:30], "little")
+    data_start = 30 + name_len + extra_len
+    comp_size = int.from_bytes(data[18:22], "little")
+    crc = int.from_bytes(data[14:18], "little")
+    data_end = data_start + comp_size
+    if data[data_end:data_end + 4] != b"PK\x01\x02":
+        raise ValueError("非法 ZIP：未找到中央目录头（或不是单条目）")
+    # 加密压缩数据
+    encrypted = _zipcrypto_encrypt_data(bytes(data[data_start:data_end]), password, crc)
+    # 组装输出：本地头(改 flag/压缩尺寸) + 加密数据 + 中央目录(改 flag/压缩尺寸) + EOCD(改中央目录偏移)
+    out = bytearray()
+    out += data[:data_start]
+    flags = int.from_bytes(out[6:8], "little")
+    out[6:8] = (flags | 0x1).to_bytes(2, "little")                  # 置加密标志位
+    out[18:22] = (comp_size + 12).to_bytes(4, "little")             # 本地头压缩尺寸(加密头+12)
+    out += encrypted
+    cd_off_new = len(out)                                           # 中央目录新偏移
+    out += data[data_end:]
+    cd_flags_off = cd_off_new + 8
+    cd_comp_off = cd_off_new + 20
+    cd_flags = int.from_bytes(out[cd_flags_off:cd_flags_off + 2], "little")
+    out[cd_flags_off:cd_flags_off + 2] = (cd_flags | 0x1).to_bytes(2, "little")
+    out[cd_comp_off:cd_comp_off + 4] = (comp_size + 12).to_bytes(4, "little")
+    eocd = out.rfind(b"PK\x05\x06")
+    if eocd < 0:
+        raise ValueError("非法 ZIP：未找到 EOCD")
+    out[eocd + 16:eocd + 20] = cd_off_new.to_bytes(4, "little")
+    return bytes(out)
+
+
+def _build_nsfw_encrypted_zip(image_bytes: bytes) -> bytes:
+    """构建 NSFW 密码加密 ZIP（内存）：stdlib 生成单条目 ZIP 后套用 ZipCrypto 加密。"""
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(NSFW_ZIP_ENTRY, image_bytes)
+    return _apply_zipcrypto_encryption(zip_buf.getvalue(), NSFW_ZIP_PASSWORD.encode("utf-8"))
 
 # ========== 打标 / 画师推荐 LLM 模板（移植自 nai-brush） ==========
 TAGGER_PROMPT_TEMPLATE = """你是图片内容打标器（Danbooru / NovelAI tag 体系）。
@@ -2110,7 +2220,8 @@ class FigurineProPlugin(Star):
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
         async def generate_image(self, event: AstrMessageEvent, prompt: str, model: str = "",
-                                 params: Optional[Dict] = None, selfie: bool = False):
+                                 params: Optional[Dict] = None, selfie: bool = False,
+                                 nsfw: bool = False):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
 
             注意：若用户在当前消息（或引用/刚发送的消息）中附带图片，本工具会自动提取该图片作为参考进行「图+文生图」；若纯文本描述则进行「文生图」。
@@ -2121,6 +2232,7 @@ class FigurineProPlugin(Star):
                 model(string): 生图模型名（可留空，留空则用当前会话所在群的默认模型；若不确定可用模型请先调用 query_generation_models 工具查询）
                 params(object): 生图参数（可选，JSON对象，如 {"size":"4K","temperature":0.9}；可用键：size/temperature/max_tokens/steps/negative_prompt）
                 selfie(boolean): 自拍模式。用户要求画「你（AI 自己）」的自拍/形象时为 true（自动在提示词前追加自拍人物外貌特征），其他情况默认 false
+                nsfw(boolean): NSFW 加密模式。用户要求生成 NSFW/成人内容时为 true，生图结果会打包成密码加密 ZIP 发送（解压密码 nsfwmiaomiao），默认 false
             """
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
@@ -2157,7 +2269,7 @@ class FigurineProPlugin(Star):
             cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
             task = asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
                                                             params=cleaned_params,
-                                                            image_bytes_list=image_bytes_list))
+                                                            image_bytes_list=image_bytes_list, nsfw=nsfw))
             # 保存后台任务引用（防 GC），结束后自动从集合移除；terminate 时统一回收
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
@@ -2165,13 +2277,15 @@ class FigurineProPlugin(Star):
 
         async def _async_generate(self, event: AstrMessageEvent, prompt: str, model: str = "", quota: int = 1,
                                   params: Optional[Dict] = None,
-                                  image_bytes_list: Optional[List[bytes]] = None) -> None:
+                                  image_bytes_list: Optional[List[bytes]] = None,
+                                  nsfw: bool = False) -> None:
             """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。
 
             model: 指定生图模型（可空，空则 _call_api 内部走默认选择逻辑）；
             quota: 本次生成消耗的次数（与 _check_usage_quota / _consume_quota 的 quota 语义一致）；
             params: 生成参数（已在 generate_image 清洗），在 _call_api 内与模型默认参数合并；
             image_bytes_list: 用户当前消息中提取的参考图片（图+文生图用），None/空列表则纯文生图。
+            nsfw: NSFW 加密模式——为 True 时生图结果打包成密码加密 ZIP 发送（不直接发图），默认 False。
             """
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
@@ -2209,15 +2323,19 @@ class FigurineProPlugin(Star):
                         remaining = self._get_group_count(group_id) if group_id else 0
                     else:
                         remaining = self._get_user_count(sender_id)
-                    try:
-                        caption = f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"
-                        send_res = await self._send_image_with_recall(event, res, caption)
-                        if send_res == "USE_CHAIN_RESULT":
-                            await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(caption)]))
-                        elif send_res:
-                            await event.send(MessageChain(chain=[Plain(f"❌ 发送失败: {send_res}")]))
-                    except Exception as e:
-                        logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
+                    if nsfw:
+                        # NSFW 加密模式：不直接发图，打包成密码加密 ZIP 发送（原始图仍已落盘时间线）
+                        await self._send_nsfw_zip(event, res, used_model, remaining)
+                    else:
+                        try:
+                            caption = f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"
+                            send_res = await self._send_image_with_recall(event, res, caption)
+                            if send_res == "USE_CHAIN_RESULT":
+                                await event.send(MessageChain(chain=[Image.fromBytes(res), Plain(caption)]))
+                            elif send_res:
+                                await event.send(MessageChain(chain=[Plain(f"❌ 发送失败: {send_res}")]))
+                        except Exception as e:
+                            logger.error(f"[NewImage] 发送生图结果失败: {e}", exc_info=True)
                 else:
                     try:
                         await event.send(MessageChain(chain=[Plain(f"❌ 生成失败: {res}")]))
@@ -2667,6 +2785,42 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"[NewImage] 自动撤回模式发送 caption 失败: {e}", exc_info=True)
         return None
+
+    async def _send_nsfw_zip(self, event: AstrMessageEvent, image_bytes: bytes,
+                             used_model: str, remaining: int) -> None:
+        """NSFW 加密模式发送：把生图结果打包成密码加密 ZIP 发送（不直接发图）。
+
+        原始图片已由调用方 _save_generation 落盘时间线，本方法只负责生成并发送加密 ZIP。
+        """
+        zip_path: Optional[Path] = None
+        try:
+            # 1. 内存构建密码加密 ZIP（纯 Python ZipCrypto，兼容 Python 3.14+ stdlib 移除写加密的限制）
+            zip_data = _build_nsfw_encrypted_zip(image_bytes)
+            # 2. 落盘插件数据目录缓存（文件名可读，便于管理；发送后清理）
+            cache_dir = Path(self.plugin_data_dir) / NSFW_ZIP_CACHE_DIR
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zip_path = cache_dir / f"nsfw_{ts}.zip"
+            zip_path.write_bytes(zip_data)
+            # 3. 发送 File 组件（File(name=文件名, file=本地路径)）
+            await event.send(MessageChain(chain=[
+                File(name=zip_path.name, file=str(zip_path)),
+                Plain(f"🔒 NSFW 图片已加密发送，解压密码：{NSFW_ZIP_PASSWORD} | 模型: {used_model} | 剩余: {remaining}次"),
+            ]))
+            logger.info("[NewImage] NSFW 图片已加密发送（%s）", zip_path.name)
+        except Exception as e:
+            logger.error(f"[NewImage] NSFW 加密 ZIP 发送失败: {e}", exc_info=True)
+            try:
+                await event.send(MessageChain(chain=[Plain(f"❌ NSFW 图片加密发送失败: {e}")]))
+            except Exception as e2:
+                logger.error(f"[NewImage] 发送 NSFW 失败提示失败: {e2}", exc_info=True)
+        finally:
+            # 4. 发送完成后清理 ZIP 缓存文件（原始图仍在时间线/存档中，管理员可查）
+            if zip_path is not None:
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.error(f"[NewImage] 清理 NSFW ZIP 缓存失败: {e}")
 
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
                         group_id: Optional[str] = None, model_override: Optional[str] = None,
