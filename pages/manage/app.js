@@ -1069,7 +1069,7 @@
   /* ============================================================
    * 导航 / 事件绑定
    * ============================================================ */
-  var PAGE_TITLES = { models: "提供商管理", counts: "次数管理", logs: "生图日志", settings: "基础设置" };
+  var PAGE_TITLES = { models: "提供商管理", counts: "次数管理", logs: "生图日志", artists: "画师预设", settings: "基础设置" };
   var CURRENT = "models";
 
   function switchPage(name) {
@@ -1095,11 +1095,11 @@
     }
     else if (CURRENT === "counts") loadCounts(true);
     else if (CURRENT === "logs") loadLogs(true);
-    else if (CURRENT === "settings") {
-      loadConfig();
+    else if (CURRENT === "artists") {
       loadArtistPresets();
       loadArtistGroups();
     }
+    else if (CURRENT === "settings") loadConfig();
   }
 
   function bindEvents() {
