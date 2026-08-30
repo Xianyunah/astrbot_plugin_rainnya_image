@@ -440,6 +440,9 @@ class FigurineProPlugin(Star):
         self.group_artist_file = self.plugin_data_dir / "group_artist.json"
         self.artist_presets: List[Dict[str, Any]] = []
         self.group_artists: Dict[str, str] = {}
+        # NSFW 加密按群开关（group_nsfw_zip.json：{群ID: True/False}，只存「覆盖」的群）
+        self.group_nsfw_zip_file = self.plugin_data_dir / "group_nsfw_zip.json"
+        self.group_nsfw_zip: Dict[str, bool] = {}
         self.generation_history_file = self.plugin_data_dir / "generation_history.json"
         self.generation_history: List[Dict[str, Any]] = []
         self._history_lock = asyncio.Lock()  # 生图时间线并发追加/删除/落盘锁
@@ -546,6 +549,7 @@ class FigurineProPlugin(Star):
         await self._load_group_models()
         await self._load_artist_presets()
         await self._load_group_artists()
+        await self._load_group_nsfw_zip()
         await self._load_generation_history()
         self.api_timeout = max(API_TIMEOUT_MIN_SECONDS, int(self.conf.get("api_timeout", 120)))
         logger.info(f"NewImage: API请求超时时间设置为 {self.api_timeout}s")
@@ -1485,6 +1489,30 @@ class FigurineProPlugin(Star):
         """原子写各群画师串预设映射。"""
         await save_json(self.group_artist_file, self.group_artists)
 
+    async def _load_group_nsfw_zip(self):
+        """加载各群 NSFW 加密开关映射 {群号: True/False}（只存「覆盖」的群）。"""
+        data = await load_json(self.group_nsfw_zip_file)
+        if isinstance(data, dict):
+            self.group_nsfw_zip = {str(k): bool(v) for k, v in data.items()}
+        else:
+            self.group_nsfw_zip = {}
+
+    async def _save_group_nsfw_zip(self):
+        """原子写各群 NSFW 加密开关映射。"""
+        await save_json(self.group_nsfw_zip_file, self.group_nsfw_zip)
+
+    def _nsfw_zip_effective(self, group_id: Optional[str]) -> bool:
+        """NSFW 加密双层开关生效判定。
+
+        全局开关 nsfw_zip_enabled 关闭 → 一律不加密（直接发原图）；
+        开启时：群有覆盖（group_nsfw_zip 中存在该群）用群覆盖值，否则跟随全局开启。
+        """
+        if not self.conf.get("nsfw_zip_enabled", True):
+            return False
+        if group_id and str(group_id) in self.group_nsfw_zip:
+            return bool(self.group_nsfw_zip[str(group_id)])
+        return True
+
     def _get_group_artist_preset(self, group_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """返回当前群激活的画师串预设（未配置/关闭/不存在 → None）。
 
@@ -1804,6 +1832,51 @@ class FigurineProPlugin(Star):
         await self._save_group_artists()
         logger.info(f"[NewImage] 群 {group_id} 的画师串已切换为: {target['name']}")
         yield event.plain_result(f"✅ 本群画师串已切换为: {target['name']}")
+
+    @filter.command("发图加密", prefix_optional=True)
+    async def on_nsfw_zip_switch(self, event: AstrMessageEvent):
+        """按群管理 NSFW 加密开关（仅管理员）。
+
+        `发图加密` → 查询本群状态（跟随全局 or 独立覆盖）
+        `发图加密 开` → 本群启用 NSFW 加密（覆盖全局）
+        `发图加密 关` → 本群禁用 NSFW 加密（LLM 画 NSFW 直接发原图）
+        """
+        group_id = event.get_group_id()
+        param = event.message_str.strip()
+        param = param.removeprefix("发图加密").strip()  # 兼容 message_str 带/不带指令名
+        if not group_id:
+            yield event.plain_result("发图加密按群管理，仅支持在群聊中使用")
+            return
+        if not param:
+            # 查询：显示当前群状态（跟随全局 or 独立覆盖）
+            global_on = bool(self.conf.get("nsfw_zip_enabled", True))
+            if str(group_id) in self.group_nsfw_zip:
+                val = bool(self.group_nsfw_zip[str(group_id)])
+                yield event.plain_result(
+                    f"🔒 本群 NSFW 加密：{'开启' if val else '关闭'}（独立覆盖全局）\n"
+                    f"全局开关：{'开启' if global_on else '关闭'}\n"
+                    f"管理员可用 `>>发图加密 开|关` 切换，`>>发图加密` 查询")
+            else:
+                yield event.plain_result(
+                    f"🔒 本群 NSFW 加密：{'开启' if global_on else '关闭'}（跟随全局）\n"
+                    f"管理员可用 `>>发图加密 开|关` 单独覆盖，`>>发图加密` 查询")
+            return
+        if not self.is_global_admin(event):
+            yield event.plain_result("仅管理员可切换 NSFW 加密开关")
+            return
+        if param in ("开", "on", "true", "1"):
+            self.group_nsfw_zip[str(group_id)] = True
+            await self._save_group_nsfw_zip()
+            logger.info(f"[NewImage] 群 {group_id} 已开启 NSFW 加密")
+            yield event.plain_result("✅ 本群已开启 NSFW 加密（LLM 画 NSFW 将加密 ZIP 发送）")
+            return
+        if param in ("关", "off", "false", "0"):
+            self.group_nsfw_zip[str(group_id)] = False
+            await self._save_group_nsfw_zip()
+            logger.info(f"[NewImage] 群 {group_id} 已关闭 NSFW 加密")
+            yield event.plain_result("❌ 本群已关闭 NSFW 加密（LLM 画 NSFW 将直接发原图）")
+            return
+        yield event.plain_result("格式: >>发图加密 开|关（按群管理 NSFW 加密）")
 
     # ========== LLM 公共层（打标/画师推荐用） ==========
 
@@ -2493,10 +2566,11 @@ class FigurineProPlugin(Star):
                         remaining = self._get_group_count(group_id) if group_id else 0
                     else:
                         remaining = self._get_user_count(sender_id)
-                    if nsfw:
-                        # NSFW 加密模式：不直接发图，打包成密码加密 ZIP 发送（原始图仍已落盘时间线）
+                    if nsfw and self._nsfw_zip_effective(group_id):
+                        # NSFW 加密模式（双层开关生效时）：不直接发图，打包成密码加密 ZIP 发送（原始图仍已落盘时间线）
                         await self._send_nsfw_zip(event, res, used_model, remaining)
                     else:
+                        # nsfw 被全局/按群开关关闭，或非 NSFW：走普通 Image 直发路径
                         try:
                             caption = f"✅ 已生成 | 模型: {used_model} | 剩余: {remaining}次"
                             send_res = await self._send_image_with_recall(event, res, caption)
@@ -3842,6 +3916,8 @@ class FigurineProPlugin(Star):
         # NSFW 过滤
         "nsfw_filter_enabled": bool,
         "nsfw_filter_tags": str,
+        # NSFW 加密（LLM 工具 nsfw=true 走加密 ZIP 发送的双层开关）
+        "nsfw_zip_enabled": bool,
     }
 
     def _register_web_apis(self) -> None:
@@ -4536,6 +4612,8 @@ class FigurineProPlugin(Star):
                 # NSFW 过滤
                 "nsfw_filter_enabled": bool(self.conf.get("nsfw_filter_enabled", False)),
                 "nsfw_filter_tags": str(self.conf.get("nsfw_filter_tags", "") or ""),
+                # NSFW 加密
+                "nsfw_zip_enabled": bool(self.conf.get("nsfw_zip_enabled", True)),
             })
         except Exception as e:
             return error_response(str(e))

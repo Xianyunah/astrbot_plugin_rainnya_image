@@ -400,6 +400,12 @@
     },
     "default": []
   },
+  "nsfw_zip_enabled": {
+    "description": "【NSFW 加密】启用 NSFW 图片加密 ZIP 发送",
+    "type": "bool",
+    "hint": "关闭后，即使 LLM 调用 generate_image 传 nsfw=true，也会直接发送原图而不加密打包。可按群用指令「发图加密 开|关」单独覆盖。",
+    "default": true
+  },
   "nsfw_filter_enabled": {
     "description": "【NSFW 过滤】是否启用 NSFW 标签过滤",
     "type": "bool",

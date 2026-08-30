@@ -446,6 +446,10 @@
                   <span class="field-label">NSFW 标签</span>
                   <input type="text" id="cfgNsfwTags" class="input" placeholder="{{{{{nsfw}}}}}">
                 </label>
+                <label class="field field-row">
+                  <span class="field-label">启用 NSFW 加密 ZIP 发送<i class="field-hint">关闭后即使 LLM 传 nsfw=true 也直接发原图；可按群用指令「发图加密 开|关」覆盖</i></span>
+                  <input type="checkbox" id="cfgNsfwZipEnabled" class="switch">
+                </label>
               </div>
             </div>
 

@@ -1021,6 +1021,7 @@
       /* NSFW 过滤 */
       el("cfgNsfwFilter").checked = !!c.nsfw_filter_enabled;
       el("cfgNsfwTags").value = c.nsfw_filter_tags || "";
+      el("cfgNsfwZipEnabled").checked = c.nsfw_zip_enabled !== false;
       /* 打标 */
       el("cfgTaggerProvider").value = c.tagger_provider_id || "";
       el("cfgTaggerTemp").value = c.tagger_temperature != null ? c.tagger_temperature : "";
@@ -1114,6 +1115,7 @@
       /* NSFW 过滤 */
       nsfw_filter_enabled: el("cfgNsfwFilter").checked,
       nsfw_filter_tags: el("cfgNsfwTags").value,
+      nsfw_zip_enabled: el("cfgNsfwZipEnabled").checked,
       /* 打标 */
       tagger_provider_id: el("cfgTaggerProvider").value.trim(),
       tagger_temperature: parseFloat(el("cfgTaggerTemp").value) || 0.2,
