@@ -702,6 +702,18 @@ class FigurineProPlugin(Star):
         entry = self._get_model_entry(name)
         return int(entry.get("quota", 1)) if entry else 1
 
+    def _expected_model_name(self, group_id: Optional[str] = None) -> str:
+        """返回手动命令在 _call_api 中会选中的模型名（与 _call_api 选择优先级一致，无 model_override）。
+
+        优先级：本群 group_models > available_model_names[0] > conf.model 兜底。
+        用于在生图前（_call_api 尚未返回 used_model）预估配额做次数预检。
+        """
+        if group_id and self.group_models.get(group_id):
+            return self.group_models[group_id]
+        if self.available_model_names:
+            return self.available_model_names[0]
+        return (self.conf.get("model", "") or "").strip()
+
     def _get_model_default_params(self, name: str) -> Dict:
         """返回该模型默认生成参数（params 的副本；找不到或无参数返回空 dict）。"""
         entry = self._get_model_entry(name)
@@ -907,7 +919,9 @@ class FigurineProPlugin(Star):
             if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
                                                                                                    []): return
             # 次数配额检查（与文生图 / LLM 工具共用 _check_usage_quota）
-            err = self._check_usage_quota(sender_id, group_id)
+            # 按预期模型配额预检（多配额模型按真实消耗扣，见 _consume_quota 处）
+            _expected_quota = self._get_model_quota(self._expected_model_name(group_id))
+            err = self._check_usage_quota(sender_id, group_id, _expected_quota)
             if err:
                 yield event.plain_result(err)
                 return
@@ -960,8 +974,8 @@ class FigurineProPlugin(Star):
             elapsed = (datetime.now() - start_time).total_seconds()
             if isinstance(res, bytes):
                 if not is_master:
-                    # 扣除次数（群组优先于个人，管理员豁免）
-                    await self._consume_quota(sender_id, group_id)
+                    # 扣除次数（群组优先于个人，管理员豁免）；按实际使用模型的配额扣
+                    await self._consume_quota(sender_id, group_id, count=self._get_model_quota(used_model))
                 # 落盘 + 记录时间线
                 try:
                     await self._save_generation(group_id, sender_id, user_prompt, used_model, res)
@@ -1020,7 +1034,9 @@ class FigurineProPlugin(Star):
             if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
                                                                                                    []): return
             # 次数配额检查（与图生图 / LLM 工具共用 _check_usage_quota）
-            err = self._check_usage_quota(sender_id, group_id)
+            # 按预期模型配额预检（多配额模型按真实消耗扣，见 _consume_quota 处）
+            _expected_quota = self._get_model_quota(self._expected_model_name(group_id))
+            err = self._check_usage_quota(sender_id, group_id, _expected_quota)
             if err:
                 yield event.plain_result(err)
                 return
@@ -1046,8 +1062,8 @@ class FigurineProPlugin(Star):
 
             if isinstance(res, bytes):
                 if not is_master:
-                    # 扣除次数（群组优先于个人，管理员豁免）
-                    await self._consume_quota(sender_id, group_id)
+                    # 扣除次数（群组优先于个人，管理员豁免）；按实际使用模型的配额扣
+                    await self._consume_quota(sender_id, group_id, count=self._get_model_quota(used_model))
                 # 落盘 + 记录时间线
                 try:
                     await self._save_generation(group_id, sender_id, prompt, used_model, res)
@@ -2043,10 +2059,24 @@ class FigurineProPlugin(Star):
                     if not isinstance(item, dict) or item.get("type") != "image":
                         continue
                     data = item.get("data") or {}
-                    src = str(data.get("file") or data.get("url") or "").strip()
-                    if not src:
-                        continue
-                    raw = await self.iwf._load_bytes(src)
+                    # file 常是缓存文件名（abc.jpg / xxxx.image），Path.is_file() 为 False；
+                    # 分别尝试：file 是本机文件则读，否则回退 url（二者互不阻塞）
+                    file_val = str(data.get("file") or "").strip()
+                    url_val = str(data.get("url") or "").strip()
+                    raw = None
+                    if file_val:
+                        try:
+                            file_path = Path(file_val)
+                            if file_path.is_file():  # 仅当确为本机文件才读，缓存名/相对路径跳过
+                                loop = asyncio.get_running_loop()
+                                raw = await loop.run_in_executor(None, file_path.read_bytes)
+                        except Exception:
+                            raw = None
+                    if raw is None and url_val:
+                        try:
+                            raw = await self.iwf._download_image(url_val)
+                        except Exception:
+                            raw = None
                     if raw:
                         images.append(raw)
                 if images:
@@ -3092,11 +3122,13 @@ class FigurineProPlugin(Star):
             scale = 6.0
         scale = max(0.0, min(scale, 10.0))
 
-        # ========== 负面词：默认模板作底，用户传入则替换 ==========
+        # ========== 负面词：默认模板作底，用户/过滤词叠加在前 ==========
+        # 语义：默认模板（质量保底词）始终保留；用户/画师串/NSFW 过滤词叠加在其前。
+        # final_params["negative_prompt"] 可能是 "filter_tags, 画师串neg" / "filter_tags, 用户neg" 等形式。
         negative_prompt = NOVALAI_DEFAULT_NEGATIVE_PROMPT
         user_neg = (gen_params or {}).get("negative_prompt")
         if isinstance(user_neg, str) and user_neg.strip():
-            negative_prompt = user_neg.strip()
+            negative_prompt = f"{user_neg.strip()}, {NOVALAI_DEFAULT_NEGATIVE_PROMPT}"
 
         # ========== sampler（可选，非法回退默认） ==========
         sampler = NOVALAI_DEFAULT_SAMPLER
@@ -3268,11 +3300,13 @@ class FigurineProPlugin(Star):
             scale = 6.0
         scale = max(0.0, min(scale, 10.0))
 
-        # ========== 负面词：默认模板作底，用户传入则替换 ==========
+        # ========== 负面词：默认模板作底，用户/过滤词叠加在前 ==========
+        # 语义：默认模板（质量保底词）始终保留；用户/画师串/NSFW 过滤词叠加在其前。
+        # final_params["negative_prompt"] 可能是 "filter_tags, 画师串neg" / "filter_tags, 用户neg" 等形式。
         negative_prompt = NOVALAI_DEFAULT_NEGATIVE_PROMPT
         user_neg = (gen_params or {}).get("negative_prompt")
         if isinstance(user_neg, str) and user_neg.strip():
-            negative_prompt = user_neg.strip()
+            negative_prompt = f"{user_neg.strip()}, {NOVALAI_DEFAULT_NEGATIVE_PROMPT}"
 
         # ========== sampler（可选，非法回退默认） ==========
         sampler = NOVALAI_DEFAULT_SAMPLER
@@ -4233,6 +4267,9 @@ class FigurineProPlugin(Star):
                 self.default_image_size = (self.conf.get("image_size", "") or "").strip().upper()
             if "hires_whitelist" in saved:
                 self.hires_whitelist = [str(x) for x in self.conf.get("hires_whitelist", [])]
+            # 预设（prompt_list）改动后即时重载 prompt_map，避免重启才生效
+            if "prompt_list" in saved:
+                await self._load_prompt_map()
             return json_response({"ok": True, "saved": saved})
         except Exception as e:
             return error_response(str(e))
