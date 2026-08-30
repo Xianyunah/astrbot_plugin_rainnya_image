@@ -56,6 +56,24 @@
   function openModal(id) { el(id).hidden = false; }
   function closeModal(id) { el(id).hidden = true; }
 
+  /* ---------- 通用确认弹层（替代原生 confirm，iframe 内禁用原生） ---------- */
+  var confirmResolve = null; // 当前确认弹层的 resolve 回调
+  function confirmDialog(msg, title) {
+    return new Promise(function (resolve) {
+      confirmResolve = resolve;
+      el("confirmTitle").textContent = title || "确认操作";
+      el("confirmMsg").textContent = msg || "";
+      openModal("confirmModal");
+    });
+  }
+  function confirmFinish(result) {
+    if (confirmResolve) {
+      confirmResolve(result);
+      confirmResolve = null;
+    }
+    closeModal("confirmModal");
+  }
+
   /* ---------- bridge 封装 ---------- */
   async function apiGet(endpoint, params) { return await bridge.apiGet(endpoint, params || {}); }
   async function apiPost(endpoint, body) { return await bridge.apiPost(endpoint, body || {}); }
@@ -354,7 +372,7 @@
       if (String(providersData[i].id) === String(id)) { p = providersData[i]; break; }
     }
     if (!p) return;
-    if (!confirm("确认删除提供商「" + p.name + "」？其下所有模型配置将一并删除。")) return;
+    if (!(await confirmDialog("确认删除提供商「" + p.name + "」？其下所有模型配置将一并删除。", "删除提供商"))) return;
     try {
       await apiPost("providers/delete", { id: id });
       toast("已删除提供商「" + p.name + "」", "success");
@@ -1161,14 +1179,14 @@
       loadProviderModels(currentProviderId);
       toast("已重置为该提供商当前模型", "info");
     });
-    el("modelsBody").addEventListener("click", function (e) {
+    el("modelsBody").addEventListener("click", async function (e) {
       var btn = e.target.closest("[data-act='del']");
       if (!btn) return;
       var tr = btn.closest("tr[data-i]");
       if (!tr) return;
       var i = parseInt(tr.getAttribute("data-i"), 10);
       var name = modelsData[i] && modelsData[i].name;
-      if (name && !confirm("确认删除模型「" + name + "」？（未保存前不生效）")) return;
+      if (name && !(await confirmDialog("确认删除模型「" + name + "」？（未保存前不生效）", "删除模型"))) return;
       modelsData.splice(i, 1);
       renderModels();
     });
@@ -1230,18 +1248,23 @@
       el("rechargeAmount").value = chip.getAttribute("data-amt");
     });
 
+    /* 通用确认弹层 */
+    el("confirmOk").addEventListener("click", function () { confirmFinish(true); });
+    el("confirmCancel").addEventListener("click", function () { confirmFinish(false); });
+    el("confirmClose").addEventListener("click", function () { confirmFinish(false); });
+
     /* 日志 */
     el("logScope").addEventListener("change", function () { loadLogs(true); });
     el("logDays").addEventListener("change", function () { loadLogs(true); });
     el("logGroup").addEventListener("change", function () { loadLogs(true); });
     el("logsMore").addEventListener("click", function () { logPage++; loadLogs(false); });
-    el("logsBody").addEventListener("click", function (e) {
+    el("logsBody").addEventListener("click", async function (e) {
       var card = e.target.closest(".log-card");
       if (!card) return;
       var ts = card.getAttribute("data-ts");
       if (e.target.closest('[data-act="view"]')) viewLogDetail(ts);
       else if (e.target.closest('[data-act="del"]')) {
-        if (confirm("确认删除该条生图记录？")) deleteLog(ts);
+        if (await confirmDialog("确认删除该条生图记录？", "删除记录")) deleteLog(ts);
       }
     });
 
@@ -1260,14 +1283,14 @@
       if (last) { var nm = last.querySelector('[data-k="name"]'); if (nm) nm.focus(); }
     });
     el("btnArtistPresetsSave").addEventListener("click", saveArtistPresets);
-    el("artistPresetsBody").addEventListener("click", function (e) {
+    el("artistPresetsBody").addEventListener("click", async function (e) {
       var btn = e.target.closest("[data-act='del']");
       if (!btn) return;
       var tr = btn.closest("tr[data-i]");
       if (!tr) return;
       var i = parseInt(tr.getAttribute("data-i"), 10);
       var name = artistPresetsData[i] && artistPresetsData[i].name;
-      if (name && !confirm("确认删除预设「" + name + "」？（未保存前不生效）")) return;
+      if (name && !(await confirmDialog("确认删除预设「" + name + "」？（未保存前不生效）", "删除预设"))) return;
       artistPresetsData.splice(i, 1);
       renderArtistPresets();
     });
@@ -1291,6 +1314,7 @@
     /* Esc 关闭弹层 / 遮罩点击关闭 */
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
+        if (!el("confirmModal").hidden) confirmFinish(false);
         if (!el("providerModal").hidden) closeModal("providerModal");
         if (!el("rechargeModal").hidden) closeModal("rechargeModal");
         if (!el("viewModal").hidden) closeModal("viewModal");
@@ -1300,6 +1324,9 @@
       el(id).addEventListener("click", function (e) {
         if (e.target === el(id)) closeModal(id);
       });
+    });
+    el("confirmModal").addEventListener("click", function (e) {
+      if (e.target === el("confirmModal")) confirmFinish(false);
     });
   }
 
