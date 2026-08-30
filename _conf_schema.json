@@ -1,15 +1,14 @@
 {
-    "provider_id": {
-        "description": "【推荐】选择生图API提供商（已包含模型）",
-        "type": "string",
-        "hint": "从 AstrBot 已配置的提供商中选择。选择后将自动使用该提供商的 API URL、API Key 和模型。格式为 '来源/配置名/模型名'。如未选择，则使用下方的手动配置。",
-        "default": "",
-        "_special": "select_provider"
+    "webui_hint": {
+        "description": "【重要】本插件的提供商、模型、次数、日志、全部设置均通过 WebUI 管理",
+        "type": "text",
+        "hint": "请打开 AstrBot 插件管理 → 本插件 → WebUI 面板进行操作。API 提供商（Gemini/OpenAI/NovalAI）、模型列表、用户/群组次数、生图日志、基础设置均在该面板管理；下方 api_url/api_keys/model 等手动配置项仅保留给仍使用旧方式的用户。",
+        "default": ""
     },
     "api_url": {
         "description": "【手动配置】API的URL地址",
         "type": "string",
-        "hint": "仅当未选择上方提供商时使用。可填写完整接口地址或基础域名，插件会自动拼接 /v1/chat/completions。",
+        "hint": "供仍使用手动 API 方式配置的用户填写。可填写完整接口地址或基础域名，插件会自动拼接 /v1/chat/completions。注意：多提供商架构下推荐使用上方 webui_hint 所述 WebUI 面板管理 API 配置。",
         "default": ""
     },
     "model": {
@@ -21,7 +20,7 @@
     "api_keys": {
         "description": "【手动配置】API 密钥列表",
         "type": "list",
-        "hint": "仅当未选择上方提供商时使用。可以填写多个密钥，插件会自动轮换使用。",
+        "hint": "供仍使用手动 API 方式配置的用户填写。可以填写多个密钥，插件会自动轮换使用。注意：多提供商架构下推荐使用 WebUI 面板管理 API 密钥。",
         "items": {
             "type": "string",
             "description": "API 密钥"
@@ -94,6 +93,54 @@
         "hint": "Gemini 模式下生效。只有在此列表中的用户，在指令中输入 2K/4K 时才会自动转为分辨率参数。不在列表中的用户输入 2K/4K 将作为普通文本传入 prompt。留空则所有用户都不允许通过指令指定分辨率。",
         "items": { "type": "string", "description": "用户QQ号" },
         "default": []
+    },
+    "openai_size": {
+        "description": "【OpenAI 渠道】默认生成分辨率",
+        "type": "string",
+        "hint": "OpenAI 兼容渠道生图时的默认尺寸。可选值：1K、2K、4K，留空则不指定。模型默认参数与指令显式参数优先于本设置。",
+        "default": ""
+    },
+    "openai_temperature": {
+        "description": "【OpenAI 渠道】默认 temperature",
+        "type": "float",
+        "hint": "OpenAI 兼容渠道生图时的默认采样温度（0-2），留空使用 1.0。",
+        "default": 1.0
+    },
+    "openai_max_tokens": {
+        "description": "【OpenAI 渠道】默认 max_tokens",
+        "type": "int",
+        "hint": "OpenAI 兼容渠道生图时的默认最大输出 token 数（64-16384），留空使用 2048。",
+        "default": 2048
+    },
+    "novalai_size": {
+        "description": "【NovalAI 渠道】默认生成分辨率",
+        "type": "string",
+        "hint": "NovalAI 渠道生图时的默认尺寸。可选值：1K、2K、4K，留空则不指定。模型默认参数与指令显式参数优先于本设置。",
+        "default": ""
+    },
+    "novalai_sampler": {
+        "description": "【NovalAI 渠道】默认采样器",
+        "type": "string",
+        "hint": "NovalAI 渠道生图时的默认采样器。可选：k_euler_ancestral / k_dpmpp_2s_ancestral / k_dpmpp_2m_sde / k_euler / k_dpmpp_2m / k_dpmpp_sde，留空使用 k_euler_ancestral。",
+        "default": "k_euler_ancestral"
+    },
+    "novalai_steps": {
+        "description": "【NovalAI 渠道】默认 steps",
+        "type": "int",
+        "hint": "NovalAI 渠道生图时的默认迭代步数（1-50），留空使用 23。免费档会自动限制在 28 以内。",
+        "default": 23
+    },
+    "novalai_scale": {
+        "description": "【NovalAI 渠道】默认 CFG scale",
+        "type": "float",
+        "hint": "NovalAI 渠道生图时的默认 CFG 引导强度（0-10），留空使用 6.0。",
+        "default": 6.0
+    },
+    "novalai_negative_prompt": {
+        "description": "【NovalAI 渠道】默认负面词",
+        "type": "string",
+        "hint": "NovalAI 渠道生图时使用的负面词。留空则使用插件内置默认负面词模板。",
+        "default": ""
     },
     "user_whitelist": {
         "description": "【权限】用户白名单",

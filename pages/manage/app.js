@@ -404,9 +404,9 @@
     el("templateRow").querySelectorAll(".template-card").forEach(function (c) {
       c.classList.toggle("is-selected", c.getAttribute("data-type") === type);
     });
-    // 预填默认 BaseURL（仅当字段为空，避免覆盖用户输入）
+    // 每次切换模板都自动更新 BaseURL 为该模板默认地址（覆盖用户已填内容）
     var tpl = PROVIDER_TEMPLATES[type];
-    if (tpl && tpl.base_url && !el("provUrl").value.trim()) {
+    if (tpl && tpl.base_url) {
       el("provUrl").value = tpl.base_url;
     }
   }
@@ -791,10 +791,30 @@
       el("cfgDownloadTimeout").value = c.download_timeout != null ? c.download_timeout : 60;
       el("cfgDownloadRetries").value = c.download_retries != null ? c.download_retries : 3;
       el("cfgApiTimeout").value = c.api_timeout != null ? c.api_timeout : 120;
+      /* OpenAI */
+      el("cfgOpenaiSize").value = (c.openai_size || "").toUpperCase();
+      el("cfgOpenaiTemp").value = c.openai_temperature != null ? c.openai_temperature : "";
+      el("cfgOpenaiMaxTokens").value = c.openai_max_tokens != null ? c.openai_max_tokens : "";
       /* Gemini */
       el("cfgSafety").value = c.safety_level || "";
       el("cfgImageSize").value = (c.image_size || "").toUpperCase();
       el("cfgHires").value = (c.hires_whitelist || []).join("\n");
+      /* NovalAI */
+      el("cfgNovalaiSize").value = (c.novalai_size || "").toUpperCase();
+      var sampler = c.novalai_sampler || "";
+      var samplerSel = el("cfgNovalaiSampler");
+      samplerSel.value = sampler;
+      if (sampler && samplerSel.value !== sampler) {
+        // 后端返回了非预设的采样器值时，追加为自定义选项避免被丢弃
+        var opt = document.createElement("option");
+        opt.value = sampler;
+        opt.textContent = sampler;
+        samplerSel.appendChild(opt);
+        samplerSel.value = sampler;
+      }
+      el("cfgNovalaiSteps").value = c.novalai_steps != null ? c.novalai_steps : "";
+      el("cfgNovalaiScale").value = c.novalai_scale != null ? c.novalai_scale : "";
+      el("cfgNovalaiNeg").value = c.novalai_negative_prompt || "";
       /* 权限 */
       el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
       el("cfgUserBlack").value = (c.user_blacklist || []).join("\n");
@@ -833,10 +853,20 @@
       download_timeout: parseInt(el("cfgDownloadTimeout").value, 10) || 60,
       download_retries: parseInt(el("cfgDownloadRetries").value, 10) || 0,
       api_timeout: parseInt(el("cfgApiTimeout").value, 10) || 120,
+      /* OpenAI */
+      openai_size: el("cfgOpenaiSize").value,
+      openai_temperature: parseFloat(el("cfgOpenaiTemp").value) || 1.0,
+      openai_max_tokens: parseInt(el("cfgOpenaiMaxTokens").value, 10) || 2048,
       /* Gemini */
       safety_level: el("cfgSafety").value,
       image_size: el("cfgImageSize").value,
       hires_whitelist: splitLines(el("cfgHires").value),
+      /* NovalAI */
+      novalai_size: el("cfgNovalaiSize").value,
+      novalai_sampler: el("cfgNovalaiSampler").value,
+      novalai_steps: parseInt(el("cfgNovalaiSteps").value, 10) || 23,
+      novalai_scale: parseFloat(el("cfgNovalaiScale").value) || 6.0,
+      novalai_negative_prompt: el("cfgNovalaiNeg").value,
       /* 权限 */
       user_whitelist: splitLines(el("cfgUserWhite").value),
       user_blacklist: splitLines(el("cfgUserBlack").value),

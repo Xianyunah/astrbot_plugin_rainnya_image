@@ -593,6 +593,48 @@ class FigurineProPlugin(Star):
             return None
         return entry.get("allowed_sizes")
 
+    def _get_channel_default_params(self, provider_type: str) -> Dict:
+        """按渠道（provider_type）从 conf 读取渠道默认生成参数。
+
+        优先级：渠道默认 < 模型默认 params < 显式 gen_params（合并处见 _call_api）。
+        - openai：size / temperature / max_tokens
+        - novalai：size / sampler / steps / scale / negative_prompt
+        - gemini：无（safety_level / image_size / hires_whitelist 有各自独立用途，不并入 gen_params）
+        size 空串不写入（避免覆盖模型默认）；数值字段带默认值兜底。
+        """
+        defaults: Dict[str, Any] = {}
+        if provider_type == "openai":
+            size = str(self.conf.get("openai_size", "") or "").strip()
+            if size:
+                defaults["size"] = size
+            try:
+                defaults["temperature"] = float(self.conf.get("openai_temperature", 1.0))
+            except (TypeError, ValueError):
+                defaults["temperature"] = 1.0
+            try:
+                defaults["max_tokens"] = int(self.conf.get("openai_max_tokens", 2048))
+            except (TypeError, ValueError):
+                defaults["max_tokens"] = 2048
+        elif provider_type == "novalai":
+            size = str(self.conf.get("novalai_size", "") or "").strip()
+            if size:
+                defaults["size"] = size
+            sampler = str(self.conf.get("novalai_sampler", "") or "").strip()
+            if sampler:
+                defaults["sampler"] = sampler
+            try:
+                defaults["steps"] = int(self.conf.get("novalai_steps", 23))
+            except (TypeError, ValueError):
+                defaults["steps"] = 23
+            try:
+                defaults["scale"] = float(self.conf.get("novalai_scale", 6.0))
+            except (TypeError, ValueError):
+                defaults["scale"] = 6.0
+            neg = str(self.conf.get("novalai_negative_prompt", "") or "").strip()
+            if neg:
+                defaults["negative_prompt"] = neg
+        return defaults
+
     def _parse_and_validate_params(self, text: str, allowed_extra: Dict[str, str]) -> tuple:
         """从指令文本**开头**提取连续 `键:值` 生成参数（只取前缀段，避免误伤 prompt 正文）。
 
@@ -1927,8 +1969,17 @@ class FigurineProPlugin(Star):
 
         source_info = f"提供商:{provider_name}"
 
-        # ========== 合并生成参数：显式 gen_params > 模型默认参数（按最终 model_name 取） ==========
-        final_params = _merge_params(self._get_model_default_params(model_name), gen_params or {})
+        # ========== 合并生成参数：渠道默认 < 模型默认参数 < 显式 gen_params ==========
+        # 渠道默认参数（openai_*/novalai_* 设置）作为基础层；模型默认覆盖渠道默认，显式最高。
+        channel_defaults = self._get_channel_default_params(provider_type)
+        final_params = _merge_params(channel_defaults, self._get_model_default_params(model_name), gen_params or {})
+        # sampler/scale 不在 PARAM_SCHEMA，_merge_params 会丢弃：novalai 渠道单独补回
+        # （二者无用户显式通道——指令/LLM 工具均经 PARAM_SCHEMA 过滤，唯一来源即渠道配置）
+        if provider_type == "novalai":
+            if channel_defaults.get("sampler") and not final_params.get("sampler"):
+                final_params["sampler"] = channel_defaults["sampler"]
+            if channel_defaults.get("scale") is not None and not final_params.get("scale"):
+                final_params["scale"] = channel_defaults["scale"]
 
         # ========== 模型允许分辨率限制（allowed_sizes）统一校验 ==========
         # 说明：size 可能来自三条来源——显式 gen_params（指令 键:值 / LLM params）、指令 image_size
@@ -2273,9 +2324,10 @@ class FigurineProPlugin(Star):
         图生图 action=img2img 并在 parameters 追加 strength/noise/image/extra_noise_seed，
         width/height 覆盖为原图实际尺寸。响应为 ZIP（image_0.png）。
 
-        gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
+        gen_params: 合并后的生成参数（渠道默认 < 模型默认 < 显式），映射规则：
             size        → width/height（1K=832×1216、2K=1152×1664、4K=1664×2432，64 倍数）
             steps       → parameters.steps（默认 23，免费档 clamp ≤28）
+            scale       → parameters.scale（CFG，默认 6.0，clamp 0-10）
             negative_prompt → 替换默认负面词模板（默认模板见 NOVALAI_DEFAULT_NEGATIVE_PROMPT）
             sampler     → 非法值回退默认（PARAM_SCHEMA 无此键，仅当传入时生效）
         返回 bytes=生图成功 / str=失败原因。
@@ -2292,6 +2344,13 @@ class FigurineProPlugin(Star):
         except (TypeError, ValueError):
             steps = NOVALAI_DEFAULT_STEPS
         steps = max(1, min(steps, NOVALAI_STEPS_MAX_FREE))
+
+        # ========== scale（CFG，clamp 0-10，默认 6.0） ==========
+        try:
+            scale = float((gen_params or {}).get("scale", 6.0))
+        except (TypeError, ValueError):
+            scale = 6.0
+        scale = max(0.0, min(scale, 10.0))
 
         # ========== 负面词：默认模板作底，用户传入则替换 ==========
         negative_prompt = NOVALAI_DEFAULT_NEGATIVE_PROMPT
@@ -2311,7 +2370,7 @@ class FigurineProPlugin(Star):
             "params_version": 3,
             "width": width,
             "height": height,
-            "scale": 6,
+            "scale": scale,
             "sampler": sampler,
             "steps": steps,
             "n_samples": 1,
@@ -2446,6 +2505,16 @@ class FigurineProPlugin(Star):
         "safety_level": str,         # 安全过滤等级
         "image_size": str,           # 全局默认生成图片分辨率
         "hires_whitelist": list,     # 高分辨率白名单
+        # OpenAI 渠道默认参数
+        "openai_size": str,          # 默认尺寸 1K/2K/4K（空=不指定）
+        "openai_temperature": float, # 0-2
+        "openai_max_tokens": int,    # 64-16384
+        # NovalAI 渠道默认参数
+        "novalai_size": str,         # 1K/2K/4K（空=不指定）
+        "novalai_sampler": str,      # 采样器
+        "novalai_steps": int,        # 1-50
+        "novalai_scale": float,      # CFG 0-10
+        "novalai_negative_prompt": str,  # 负面词（空=用默认模板）
         # 权限
         "user_whitelist": list,
         "user_blacklist": list,
@@ -2980,7 +3049,7 @@ class FigurineProPlugin(Star):
         """GET {base}/config：返回全部设置（默认值对齐 _conf_schema.json）。
 
         注意：api_url/api_keys/is_gemini_api/model/provider_id 已迁移到提供商管理（providers.json），
-        不再从此接口返回；WebUI 基础设置页只暴露下方 25 个非 API 配置字段。
+        不再从此接口返回；WebUI 基础设置页暴露全部非 API 配置字段（含各渠道默认参数）。
         """
         if (resp := self._web_require_login()):
             return resp
@@ -2998,6 +3067,16 @@ class FigurineProPlugin(Star):
                 "safety_level": str(self.conf.get("safety_level", "") or ""),
                 "image_size": str(self.conf.get("image_size", "") or ""),
                 "hires_whitelist": self.conf.get("hires_whitelist", []),
+                # OpenAI 渠道默认参数
+                "openai_size": str(self.conf.get("openai_size", "") or ""),
+                "openai_temperature": self.conf.get("openai_temperature", 1.0),
+                "openai_max_tokens": self.conf.get("openai_max_tokens", 2048),
+                # NovalAI 渠道默认参数
+                "novalai_size": str(self.conf.get("novalai_size", "") or ""),
+                "novalai_sampler": str(self.conf.get("novalai_sampler", "k_euler_ancestral") or ""),
+                "novalai_steps": self.conf.get("novalai_steps", 23),
+                "novalai_scale": self.conf.get("novalai_scale", 6.0),
+                "novalai_negative_prompt": str(self.conf.get("novalai_negative_prompt", "") or ""),
                 # 权限
                 "user_whitelist": self.conf.get("user_whitelist", []),
                 "user_blacklist": self.conf.get("user_blacklist", []),
@@ -3046,6 +3125,16 @@ class FigurineProPlugin(Star):
                 if expected is bool:
                     if not isinstance(value, bool):
                         return error_response(f"字段 {key} 必须为布尔值")
+                elif expected is float:
+                    # float 字段：openai_temperature(0-2) / novalai_scale(0-10)，越界夹取（同 _coerce clamp 语义）
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        return error_response(f"字段 {key} 必须为数字")
+                    if key == "openai_temperature":
+                        value = max(0.0, min(value, 2.0))
+                    elif key == "novalai_scale":
+                        value = max(0.0, min(value, 10.0))
                 elif expected is int:
                     try:
                         value = int(value)
@@ -3054,6 +3143,11 @@ class FigurineProPlugin(Star):
                     # 非负校验：全部 int 字段均不允许负数（含超时/重试/签到奖励/上限等）
                     if value < 0:
                         return error_response(f"字段 {key} 必须 >= 0")
+                    # 渠道字段范围夹取
+                    if key == "openai_max_tokens":
+                        value = max(64, min(value, 16384))
+                    elif key == "novalai_steps":
+                        value = max(1, min(value, 50))
                 elif expected is list:
                     if not isinstance(value, list):
                         return error_response(f"字段 {key} 必须为数组")
@@ -3066,6 +3160,9 @@ class FigurineProPlugin(Star):
                 elif expected is str:
                     if not isinstance(value, str):
                         return error_response(f"字段 {key} 必须为字符串")
+                    # 渠道 size 字段：仅允许 1K/2K/4K 或空串
+                    if key in ("openai_size", "novalai_size") and value.strip() not in ("", "1K", "2K", "4K"):
+                        return error_response(f"字段 {key} 只能为 1K/2K/4K 或空")
                 config_updates[key] = value
                 saved.append(key)
             if config_updates:

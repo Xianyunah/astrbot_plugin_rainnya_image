@@ -253,6 +253,115 @@
         <section class="page" data-page="settings" id="page-settings" hidden aria-label="基础设置">
           <div class="settings-grid">
 
+            <!-- OpenAI 参数 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">OpenAI 参数</h3>
+                  <p class="card-desc">OpenAI 兼容渠道的默认生图参数。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field">
+                  <span class="field-label">默认分辨率</span>
+                  <select id="cfgOpenaiSize" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="1K">1K</option>
+                    <option value="2K">2K</option>
+                    <option value="4K">4K</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">温度（0-2，步进0.1）</span>
+                  <input type="number" id="cfgOpenaiTemp" class="input" min="0" max="2" step="0.1">
+                </label>
+                <label class="field">
+                  <span class="field-label">Max Tokens</span>
+                  <input type="number" id="cfgOpenaiMaxTokens" class="input" min="1">
+                </label>
+              </div>
+            </div>
+
+            <!-- Gemini -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">Gemini 参数</h3>
+                  <p class="card-desc">安全过滤等级、默认分辨率与高分辨率白名单。</p>
+                </div>
+              </div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">安全过滤等级</span>
+                  <select id="cfgSafety" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="BLOCK_NONE">BLOCK_NONE 不过滤</option>
+                    <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH 仅过滤高危</option>
+                    <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE</option>
+                    <option value="BLOCK_LOW_AND_ABOVE">BLOCK_LOW_AND_ABOVE</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">全局默认分辨率</span>
+                  <select id="cfgImageSize" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="1K">1K</option>
+                    <option value="2K">2K</option>
+                    <option value="4K">4K</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">高分辨率白名单（每行一个 QQ）</span>
+                  <textarea id="cfgHires" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <!-- NovalAI 参数 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">NovalAI 参数</h3>
+                  <p class="card-desc">NovelAI 渠道的默认生图参数。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field">
+                  <span class="field-label">默认分辨率</span>
+                  <select id="cfgNovalaiSize" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="1K">1K</option>
+                    <option value="2K">2K</option>
+                    <option value="4K">4K</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">采样器</span>
+                  <select id="cfgNovalaiSampler" class="input">
+                    <option value="">（不设置）</option>
+                    <option value="k_euler_ancestral">k_euler_ancestral</option>
+                    <option value="k_dpmpp_2s_ancestral">k_dpmpp_2s_ancestral</option>
+                    <option value="k_dpmpp_2m_sde">k_dpmpp_2m_sde</option>
+                    <option value="k_euler">k_euler</option>
+                    <option value="k_dpmpp_2m">k_dpmpp_2m</option>
+                    <option value="k_dpmpp_sde">k_dpmpp_sde</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">采样步数（1-50）</span>
+                  <input type="number" id="cfgNovalaiSteps" class="input" min="1" max="50">
+                </label>
+                <label class="field">
+                  <span class="field-label">引导强度 scale（0-10，步进0.1）</span>
+                  <input type="number" id="cfgNovalaiScale" class="input" min="0" max="10" step="0.1">
+                </label>
+                <label class="field">
+                  <span class="field-label">负面提示词（每行一个）</span>
+                  <textarea id="cfgNovalaiNeg" class="input" rows="3" placeholder="负面词，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
             <!-- 基础 -->
             <div class="card">
               <div class="card-head">
@@ -289,41 +398,6 @@
                 <label class="field">
                   <span class="field-label">API 超时（秒）</span>
                   <input type="number" id="cfgApiTimeout" class="input" min="1">
-                </label>
-              </div>
-            </div>
-
-            <!-- Gemini -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">Gemini 参数</h3>
-                  <p class="card-desc">安全过滤等级、默认分辨率与高分辨率白名单。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">安全过滤等级</span>
-                  <select id="cfgSafety" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="BLOCK_NONE">BLOCK_NONE 不过滤</option>
-                    <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH 仅过滤高危</option>
-                    <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE</option>
-                    <option value="BLOCK_LOW_AND_ABOVE">BLOCK_LOW_AND_ABOVE</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">全局默认分辨率</span>
-                  <select id="cfgImageSize" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="1K">1K</option>
-                    <option value="2K">2K</option>
-                    <option value="4K">4K</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">高分辨率白名单（每行一个 QQ）</span>
-                  <textarea id="cfgHires" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
                 </label>
               </div>
             </div>
