@@ -652,8 +652,8 @@ class FigurineProPlugin(Star):
             if not user_prompt:
                 yield event.plain_result("📝 用法：bnn <你的绘画想法>\n例如：bnn 樱花树下打伞的女孩")
                 return
-            # 从 bnn 的自定义 prompt 中提取分辨率（仅白名单用户）
-            user_prompt, extracted_size = self._extract_image_size(user_prompt, sender_id)
+            # 从 bnn 的自定义 prompt 中提取分辨率（仅白名单用户 + Gemini 提供商）
+            user_prompt, extracted_size = self._extract_image_size(user_prompt, sender_id, group_id=group_id)
             if not user_prompt:
                 yield event.plain_result("📝 用法：bnn <你的绘画想法>\n例如：bnn 樱花树下打伞的女孩")
                 return
@@ -674,8 +674,8 @@ class FigurineProPlugin(Star):
             extra_text = re.sub(r'@\S+?\(\d+\)', '', extra_text).strip()
             extra_text = re.sub(r'@\S+', '', extra_text).strip()
             if extra_text:
-                # 从用户补充文本中提取分辨率（仅白名单用户）
-                extra_text, extracted_size = self._extract_image_size(extra_text, sender_id)
+                # 从用户补充文本中提取分辨率（仅白名单用户 + Gemini 提供商）
+                extra_text, extracted_size = self._extract_image_size(extra_text, sender_id, group_id=group_id)
                 # 提取生成参数（键:值），校验失败明确报错不生成
                 params, cleaned_extra = self._parse_and_validate_params(extra_text, {})
                 if params is None:
@@ -787,9 +787,9 @@ class FigurineProPlugin(Star):
         group_id = event.get_group_id()
         is_master = self.is_global_admin(event)
         
-        # 从文生图 prompt 中提取分辨率（仅白名单用户）
+        # 从文生图 prompt 中提取分辨率（仅白名单用户 + Gemini 提供商）
         extracted_size = None
-        prompt, extracted_size = self._extract_image_size(prompt, sender_id)
+        prompt, extracted_size = self._extract_image_size(prompt, sender_id, group_id=group_id)
         # 提取生成参数（键:值），校验失败明确报错不生成
         gen_params, prompt = self._parse_and_validate_params(prompt, {})
         if gen_params is None:
@@ -1755,15 +1755,38 @@ class FigurineProPlugin(Star):
             presets = list(self.prompt_map.keys())
             return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
 
-    def _extract_image_size(self, text: str, sender_id: str) -> tuple:
+    def _effective_model_is_gemini(self, group_id: Optional[str] = None,
+                                   model_override: Optional[str] = None) -> bool:
+        """判断「最终生效模型」是否属于 type=gemini 的提供商。
+
+        模型优先级与 _call_api 一致：model_override > 本群 group_models > available_model_names[0]。
+        无法确定模型时回退：存在任一启用且 type=gemini 的提供商即视为可用。
+        （is_gemini_api 已废弃为历史配置，不再作为唯一闸门，以 providers.json 的 provider.type 为准。）
         """
-        从用户输入中提取分辨率参数（仅白名单用户生效）。
-        
+        model_name = (model_override or "").strip()
+        if not model_name and group_id:
+            model_name = self.group_models.get(group_id, "")
+        if not model_name and self.available_model_names:
+            model_name = self.available_model_names[0]
+        if not model_name:
+            return any(p.get("type") == "gemini" and p.get("enabled", True)
+                       for p in self.providers)
+        provider = self._find_provider_for_model(model_name)
+        return bool(provider and provider.get("type") == "gemini" and provider.get("enabled", True))
+
+    def _extract_image_size(self, text: str, sender_id: str,
+                            group_id: Optional[str] = None,
+                            model_override: Optional[str] = None) -> tuple:
+        """
+        从用户输入中提取分辨率参数（仅白名单用户 + 该模型所属提供商为 Gemini 时生效）。
+
         返回: (cleaned_text, image_size)
             - cleaned_text: 移除了分辨率关键词后的文本
             - image_size: 提取到的分辨率（如 "2K", "4K"）或 None
         """
-        if not self.is_gemini_api:
+        # 闸门：最终生效模型所属提供商 type 必须为 gemini 才启用 2K/4K 白名单提取
+        # （openai/novalai 提供商模型不启用；is_gemini_api 历史配置不再参与判断）
+        if not self._effective_model_is_gemini(group_id=group_id, model_override=model_override):
             return text, None
         
         # 检查用户是否在高分辨率白名单中
@@ -2366,20 +2389,39 @@ class FigurineProPlugin(Star):
 
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
     WEB_PLUGIN_NAME = "astrbot_plugin_nova_newimage"
-    # POST /config 白名单字段（键名 = conf 键名）
+    # POST /config 白名单字段（键名 = conf 键名；api_url/api_keys/is_gemini_api/model/provider_id 已迁移到提供商，不再暴露）
     _WEB_CONFIG_FIELD_TYPES = {
-        "api_url": str,
-        "is_gemini_api": bool,
-        "safety_level": str,
-        "image_size": str,
-        "enable_user_limit": bool,
-        "enable_group_limit": bool,
-        "group_task_limit": int,
-        "enable_checkin": bool,
-        "user_count_cap": int,
-        "hires_whitelist": list,
+        # 基础
+        "prefix": bool,              # 是否要求指令必须带前缀
+        "extra_prefix": str,         # 自定义提示词模式的前缀
+        "use_proxy": bool,           # 是否启用网络代理
+        "proxy_url": str,            # 网络代理地址
+        "download_timeout": int,     # 图片下载超时时间（秒）
+        "download_retries": int,     # 图片下载重试次数
+        "api_timeout": int,          # API请求等待超时时间（秒）
+        # Gemini
+        "safety_level": str,         # 安全过滤等级
+        "image_size": str,           # 全局默认生成图片分辨率
+        "hires_whitelist": list,     # 高分辨率白名单
+        # 权限
         "user_whitelist": list,
         "user_blacklist": list,
+        "group_whitelist": list,
+        "group_blacklist": list,
+        # 次数
+        "enable_user_limit": bool,
+        "enable_group_limit": bool,
+        "user_count_cap": int,
+        "group_task_limit": int,
+        # 签到
+        "enable_checkin": bool,
+        "checkin_fixed_reward": int,
+        "enable_random_checkin": bool,
+        "checkin_random_reward_min": int,
+        "checkin_random_reward_max": int,
+        # 帮助/预设
+        "help_menu": str,
+        "prompt_list": list,         # 生图触发词与提示词（每元素 "触发词:提示词"）
     }
 
     def _register_web_apis(self) -> None:
@@ -2406,8 +2448,8 @@ class FigurineProPlugin(Star):
             (f"{base}/logs", self._web_logs_get, ["GET"], "获取生图时间线（范围/天数/分页）"),
             (f"{base}/logs/image", self._web_logs_image, ["GET"], "获取生图图片（路径校验 + base64）"),
             (f"{base}/logs/delete", self._web_logs_delete, ["POST"], "删除生图时间线记录（按时间戳或范围）"),
-            (f"{base}/config", self._web_config_get, ["GET"], "获取基础配置（API Key 掩码）"),
-            (f"{base}/config", self._web_config_post, ["POST"], "保存部分配置（白名单字段）"),
+            (f"{base}/config", self._web_config_get, ["GET"], "获取全部设置（API 配置已迁移到提供商管理）"),
+            (f"{base}/config", self._web_config_post, ["POST"], "保存全部设置（白名单字段，一次性原子落盘）"),
         ]
         for route, handler, methods, desc in endpoints:
             self.context.register_web_api(route, handler, methods, desc)
@@ -2892,34 +2934,56 @@ class FigurineProPlugin(Star):
             return error_response(str(e))
 
     async def _web_config_get(self):
+        """GET {base}/config：返回全部设置（默认值对齐 _conf_schema.json）。
+
+        注意：api_url/api_keys/is_gemini_api/model/provider_id 已迁移到提供商管理（providers.json），
+        不再从此接口返回；WebUI 基础设置页只暴露下方 25 个非 API 配置字段。
+        """
         if (resp := self._web_require_login()):
             return resp
         try:
-            api_keys = self.conf.get("api_keys", [])
-            masked = []
-            for key in api_keys:
-                key = str(key)
-                masked.append(f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***")
             return json_response({
-                "api_url": self.conf.get("api_url", ""),
-                "model": self.conf.get("model", ""),
-                "api_keys": masked,
-                "is_gemini_api": bool(self.conf.get("is_gemini_api", False)),
-                "safety_level": self.conf.get("safety_level", ""),
-                "image_size": self.conf.get("image_size", ""),
+                # 基础
+                "prefix": bool(self.conf.get("prefix", True)),
+                "extra_prefix": str(self.conf.get("extra_prefix", "bnn") or ""),
+                "use_proxy": bool(self.conf.get("use_proxy", False)),
+                "proxy_url": str(self.conf.get("proxy_url", "") or ""),
+                "download_timeout": self.conf.get("download_timeout", 60),
+                "download_retries": self.conf.get("download_retries", 3),
+                "api_timeout": self.conf.get("api_timeout", 120),
+                # Gemini
+                "safety_level": str(self.conf.get("safety_level", "") or ""),
+                "image_size": str(self.conf.get("image_size", "") or ""),
+                "hires_whitelist": self.conf.get("hires_whitelist", []),
+                # 权限
+                "user_whitelist": self.conf.get("user_whitelist", []),
+                "user_blacklist": self.conf.get("user_blacklist", []),
+                "group_whitelist": self.conf.get("group_whitelist", []),
+                "group_blacklist": self.conf.get("group_blacklist", []),
+                # 次数
                 "enable_user_limit": bool(self.conf.get("enable_user_limit", True)),
                 "enable_group_limit": bool(self.conf.get("enable_group_limit", False)),
-                "group_task_limit": self.conf.get("group_task_limit", 2),
-                "enable_checkin": bool(self.conf.get("enable_checkin", False)),
                 "user_count_cap": self.conf.get("user_count_cap", 0),
-                "hires_whitelist": self.conf.get("hires_whitelist", []),
-                "user_whitelist": self.conf.get("user_whitelist", []),
-                "blacklist": self.conf.get("user_blacklist", []),
+                "group_task_limit": self.conf.get("group_task_limit", 2),
+                # 签到
+                "enable_checkin": bool(self.conf.get("enable_checkin", False)),
+                "checkin_fixed_reward": self.conf.get("checkin_fixed_reward", 3),
+                "enable_random_checkin": bool(self.conf.get("enable_random_checkin", False)),
+                "checkin_random_reward_min": self.conf.get("checkin_random_reward_min", 1),
+                "checkin_random_reward_max": self.conf.get("checkin_random_reward_max", 5),
+                # 帮助/预设
+                "help_menu": str(self.conf.get("help_menu", "") or ""),
+                "prompt_list": self.conf.get("prompt_list", []),
             })
         except Exception as e:
             return error_response(str(e))
 
     async def _web_config_post(self):
+        """POST {base}/config：保存全部设置（白名单 _WEB_CONFIG_FIELD_TYPES，一次性原子落盘）。
+
+        兼容旧前端：`blacklist` 别名仍接受（映射到 user_blacklist）。
+        prompt_list 元素必须是字符串且含 ":"（触发词:提示词），非法元素直接报错不落盘。
+        """
         if (resp := self._web_require_login()):
             return resp
         try:
@@ -2944,11 +3008,17 @@ class FigurineProPlugin(Star):
                         value = int(value)
                     except (TypeError, ValueError):
                         return error_response(f"字段 {key} 必须为整数")
-                    if key in ("group_task_limit", "user_count_cap") and value < 0:
+                    # 非负校验：全部 int 字段均不允许负数（含超时/重试/签到奖励/上限等）
+                    if value < 0:
                         return error_response(f"字段 {key} 必须 >= 0")
                 elif expected is list:
                     if not isinstance(value, list):
                         return error_response(f"字段 {key} 必须为数组")
+                    if key == "prompt_list":
+                        # 预设列表：元素必须是字符串且含 ":"（触发词:提示词）
+                        for item in value:
+                            if not isinstance(item, str) or ":" not in item:
+                                return error_response("prompt_list 元素格式应为 触发词:提示词")
                     value = [str(v) for v in value]
                 elif expected is str:
                     if not isinstance(value, str):
@@ -2970,8 +3040,11 @@ class FigurineProPlugin(Star):
                     self.group_task_limit = 0
                 # 并发任务计数在限制变化后不再准确，清空让各群重新计数
                 self.group_task_counts.clear()
-            if "is_gemini_api" in saved:
-                self.is_gemini_api = bool(self.conf.get("is_gemini_api", False))
+            if "api_timeout" in saved:
+                try:
+                    self.api_timeout = max(API_TIMEOUT_MIN_SECONDS, int(self.conf.get("api_timeout", 120)))
+                except (TypeError, ValueError):
+                    self.api_timeout = 120
             if "safety_level" in saved:
                 self.safety_level = (self.conf.get("safety_level", "") or "").strip()
             if "image_size" in saved:

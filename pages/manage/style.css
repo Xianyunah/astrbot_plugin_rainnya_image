@@ -839,6 +839,14 @@ html[data-theme="dark"] .type-novalai { --type-c: #a78bfa; --type-bg: rgba(167, 
 .provider-form-grid .field-row { grid-column: 1 / -1; }
 .provider-form-grid .field-row { margin: 0; }
 
+/* 设置分组：两列字段网格（开关跨整行，数字/文本自动两列） */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.form-grid .field-row { grid-column: 1 / -1; margin: 0; }
+
 /* 模板选择三卡片 */
 .template-row {
   display: grid;
@@ -928,4 +936,5 @@ html[data-theme="dark"] .type-novalai { --type-c: #a78bfa; --type-bg: rgba(167, 
   .thumb { width: 72px; height: 72px; flex-basis: 72px; }
   .log-card { flex-direction: row; }
   .log-actions { flex-direction: column; }
+  .form-grid { grid-template-columns: 1fr; }
 }

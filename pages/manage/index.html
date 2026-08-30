@@ -253,26 +253,54 @@
         <section class="page" data-page="settings" id="page-settings" hidden aria-label="基础设置">
           <div class="settings-grid">
 
+            <!-- 基础 -->
             <div class="card">
-              <div class="card-head"><h3 class="card-title">API 配置</h3></div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">API URL</span>
-                  <input type="text" id="cfgApiUrl" class="input" placeholder="https://api.example.com">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">基础</h3>
+                  <p class="card-desc">指令前缀、网络代理与请求超时等基础配置。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
+                <label class="field field-row">
+                  <span class="field-label">要求指令带前缀</span>
+                  <input type="checkbox" id="cfgPrefix" class="switch">
                 </label>
                 <label class="field">
-                  <span class="field-label">API Key（只读，掩码显示）</span>
-                  <input type="text" id="cfgApiKeys" class="input" readonly placeholder="未配置">
+                  <span class="field-label">自定义前缀</span>
+                  <input type="text" id="cfgExtraPrefix" class="input" placeholder="例如 bnn">
                 </label>
                 <label class="field field-row">
-                  <span class="field-label">Gemini 原生接口</span>
-                  <input type="checkbox" id="cfgIsGemini" class="switch">
+                  <span class="field-label">使用代理</span>
+                  <input type="checkbox" id="cfgUseProxy" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">代理地址</span>
+                  <input type="text" id="cfgProxyUrl" class="input" placeholder="http://127.0.0.1:7890">
+                </label>
+                <label class="field">
+                  <span class="field-label">下载超时（秒）</span>
+                  <input type="number" id="cfgDownloadTimeout" class="input" min="1">
+                </label>
+                <label class="field">
+                  <span class="field-label">下载重试次数</span>
+                  <input type="number" id="cfgDownloadRetries" class="input" min="0">
+                </label>
+                <label class="field">
+                  <span class="field-label">API 超时（秒）</span>
+                  <input type="number" id="cfgApiTimeout" class="input" min="1">
                 </label>
               </div>
             </div>
 
+            <!-- Gemini -->
             <div class="card">
-              <div class="card-head"><h3 class="card-title">Gemini 参数</h3></div>
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">Gemini 参数</h3>
+                  <p class="card-desc">安全过滤等级、默认分辨率与高分辨率白名单。</p>
+                </div>
+              </div>
               <div class="form">
                 <label class="field">
                   <span class="field-label">安全过滤等级</span>
@@ -300,9 +328,15 @@
               </div>
             </div>
 
+            <!-- 次数限制 -->
             <div class="card">
-              <div class="card-head"><h3 class="card-title">次数与队列</h3></div>
-              <div class="form">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">次数限制</h3>
+                  <p class="card-desc">用户 / 群组生图次数限制与并发队列。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
                 <label class="field field-row">
                   <span class="field-label">启用用户次数限制</span>
                   <input type="checkbox" id="cfgEnableUser" class="switch">
@@ -322,18 +356,46 @@
               </div>
             </div>
 
+            <!-- 签到系统 -->
             <div class="card">
-              <div class="card-head"><h3 class="card-title">签到系统</h3></div>
-              <div class="form">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">签到系统</h3>
+                  <p class="card-desc">每日签到与随机奖励次数。</p>
+                </div>
+              </div>
+              <div class="form form-grid">
                 <label class="field field-row">
                   <span class="field-label">开启每日签到（辉宝赐福）</span>
                   <input type="checkbox" id="cfgEnableCheckin" class="switch">
                 </label>
+                <label class="field">
+                  <span class="field-label">固定奖励次数</span>
+                  <input type="number" id="cfgCheckinFixed" class="input" min="0">
+                </label>
+                <label class="field field-row">
+                  <span class="field-label">启用随机奖励</span>
+                  <input type="checkbox" id="cfgRandomCheckin" class="switch">
+                </label>
+                <label class="field">
+                  <span class="field-label">随机奖励下限（次数）</span>
+                  <input type="number" id="cfgCheckinMin" class="input" min="0">
+                </label>
+                <label class="field">
+                  <span class="field-label">随机奖励上限（次数）</span>
+                  <input type="number" id="cfgCheckinMax" class="input" min="0">
+                </label>
               </div>
             </div>
 
+            <!-- 权限 -->
             <div class="card">
-              <div class="card-head"><h3 class="card-title">权限</h3></div>
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">权限</h3>
+                  <p class="card-desc">用户 / 群组白名单与黑名单，空列表表示不限制。</p>
+                </div>
+              </div>
               <div class="form">
                 <label class="field">
                   <span class="field-label">用户白名单（每行一个 QQ，空=全部）</span>
@@ -342,6 +404,34 @@
                 <label class="field">
                   <span class="field-label">用户黑名单（每行一个 QQ）</span>
                   <textarea id="cfgUserBlack" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                </label>
+                <label class="field">
+                  <span class="field-label">群白名单（每行一个群号，空=全部）</span>
+                  <textarea id="cfgGroupWhite" class="input" rows="3" placeholder="群号，每行一个"></textarea>
+                </label>
+                <label class="field">
+                  <span class="field-label">群黑名单（每行一个群号）</span>
+                  <textarea id="cfgGroupBlack" class="input" rows="3" placeholder="群号，每行一个"></textarea>
+                </label>
+              </div>
+            </div>
+
+            <!-- 帮助与预设 -->
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">帮助与预设</h3>
+                  <p class="card-desc">自定义帮助菜单与生图预设 prompt（每行 触发词:提示词）。</p>
+                </div>
+              </div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">帮助菜单（空=默认）</span>
+                  <textarea id="cfgHelpMenu" class="input" rows="4" placeholder="自定义帮助文本，留空使用默认"></textarea>
+                </label>
+                <label class="field">
+                  <span class="field-label">预设 prompt（每行 触发词:提示词）</span>
+                  <textarea id="cfgPromptList" class="input" rows="6" placeholder="手办化:Your task is to..."></textarea>
                 </label>
               </div>
             </div>

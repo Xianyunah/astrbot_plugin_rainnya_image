@@ -783,19 +783,37 @@
   async function loadConfig() {
     try {
       var c = await apiGet("config");
-      el("cfgApiUrl").value = c.api_url || "";
-      el("cfgApiKeys").value = (c.api_keys && c.api_keys.join("\n")) || "";
-      el("cfgIsGemini").checked = !!c.is_gemini_api;
+      /* 基础 */
+      el("cfgPrefix").checked = !!c.prefix;
+      el("cfgExtraPrefix").value = c.extra_prefix || "";
+      el("cfgUseProxy").checked = !!c.use_proxy;
+      el("cfgProxyUrl").value = c.proxy_url || "";
+      el("cfgDownloadTimeout").value = c.download_timeout != null ? c.download_timeout : 60;
+      el("cfgDownloadRetries").value = c.download_retries != null ? c.download_retries : 3;
+      el("cfgApiTimeout").value = c.api_timeout != null ? c.api_timeout : 120;
+      /* Gemini */
       el("cfgSafety").value = c.safety_level || "";
       el("cfgImageSize").value = (c.image_size || "").toUpperCase();
       el("cfgHires").value = (c.hires_whitelist || []).join("\n");
+      /* 权限 */
+      el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
+      el("cfgUserBlack").value = (c.user_blacklist || []).join("\n");
+      el("cfgGroupWhite").value = (c.group_whitelist || []).join("\n");
+      el("cfgGroupBlack").value = (c.group_blacklist || []).join("\n");
+      /* 次数限制 */
       el("cfgEnableUser").checked = c.enable_user_limit !== false;
       el("cfgEnableGroup").checked = !!c.enable_group_limit;
       el("cfgUserCap").value = c.user_count_cap || 0;
       el("cfgTaskLimit").value = c.group_task_limit != null ? c.group_task_limit : 2;
+      /* 签到系统 */
       el("cfgEnableCheckin").checked = !!c.enable_checkin;
-      el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
-      el("cfgUserBlack").value = (c.blacklist || []).join("\n");
+      el("cfgCheckinFixed").value = c.checkin_fixed_reward != null ? c.checkin_fixed_reward : 3;
+      el("cfgRandomCheckin").checked = !!c.enable_random_checkin;
+      el("cfgCheckinMin").value = c.checkin_random_reward_min != null ? c.checkin_random_reward_min : 1;
+      el("cfgCheckinMax").value = c.checkin_random_reward_max != null ? c.checkin_random_reward_max : 5;
+      /* 帮助与预设 */
+      el("cfgHelpMenu").value = c.help_menu || "";
+      el("cfgPromptList").value = (c.prompt_list || []).join("\n");
     } catch (e) {
       toast("加载配置失败：" + e.message, "error");
     }
@@ -807,18 +825,37 @@
 
   async function saveConfig() {
     var body = {
-      api_url: el("cfgApiUrl").value.trim(),
-      is_gemini_api: el("cfgIsGemini").checked,
+      /* 基础 */
+      prefix: el("cfgPrefix").checked,
+      extra_prefix: el("cfgExtraPrefix").value.trim(),
+      use_proxy: el("cfgUseProxy").checked,
+      proxy_url: el("cfgProxyUrl").value.trim(),
+      download_timeout: parseInt(el("cfgDownloadTimeout").value, 10) || 60,
+      download_retries: parseInt(el("cfgDownloadRetries").value, 10) || 0,
+      api_timeout: parseInt(el("cfgApiTimeout").value, 10) || 120,
+      /* Gemini */
       safety_level: el("cfgSafety").value,
       image_size: el("cfgImageSize").value,
       hires_whitelist: splitLines(el("cfgHires").value),
+      /* 权限 */
+      user_whitelist: splitLines(el("cfgUserWhite").value),
+      user_blacklist: splitLines(el("cfgUserBlack").value),
+      group_whitelist: splitLines(el("cfgGroupWhite").value),
+      group_blacklist: splitLines(el("cfgGroupBlack").value),
+      /* 次数限制 */
       enable_user_limit: el("cfgEnableUser").checked,
       enable_group_limit: el("cfgEnableGroup").checked,
       user_count_cap: parseInt(el("cfgUserCap").value, 10) || 0,
       group_task_limit: parseInt(el("cfgTaskLimit").value, 10) || 0,
+      /* 签到系统 */
       enable_checkin: el("cfgEnableCheckin").checked,
-      user_whitelist: splitLines(el("cfgUserWhite").value),
-      blacklist: splitLines(el("cfgUserBlack").value),
+      checkin_fixed_reward: parseInt(el("cfgCheckinFixed").value, 10) || 0,
+      enable_random_checkin: el("cfgRandomCheckin").checked,
+      checkin_random_reward_min: parseInt(el("cfgCheckinMin").value, 10) || 0,
+      checkin_random_reward_max: parseInt(el("cfgCheckinMax").value, 10) || 0,
+      /* 帮助与预设 */
+      help_menu: el("cfgHelpMenu").value,
+      prompt_list: splitLines(el("cfgPromptList").value),
     };
     var btn = el("btnConfigSave");
     btn.disabled = true;
