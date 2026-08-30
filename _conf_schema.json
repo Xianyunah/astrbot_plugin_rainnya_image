@@ -118,8 +118,8 @@
     "novalai_size": {
         "description": "【NovalAI 渠道】默认生成分辨率",
         "type": "string",
-        "hint": "NovalAI 渠道生图时的默认尺寸。可选值：1K、2K、4K，留空则不指定。模型默认参数与指令显式参数优先于本设置。",
-        "default": ""
+        "hint": "NovalAI 渠道生图时的默认尺寸。可选值：竖·小(portrait_small)/竖·中(portrait_medium)/竖·大(portrait_large)/横·小(landscape_small)/横·中(landscape_medium)/横·大(landscape_large)/方图(square)，旧值 1K/2K/4K 仍兼容，留空则不指定。模型默认参数与指令显式参数优先于本设置。",
+        "default": "portrait_medium"
     },
     "novalai_sampler": {
         "description": "【NovalAI 渠道】默认采样器",

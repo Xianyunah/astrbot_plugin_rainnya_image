@@ -995,7 +995,7 @@
       el("cfgImageSize").value = (c.image_size || "").toUpperCase();
       el("cfgHires").value = (c.hires_whitelist || []).join("\n");
       /* NovalAI */
-      el("cfgNovalaiSize").value = (c.novalai_size || "").toUpperCase();
+      el("cfgNovalaiSize").value = c.novalai_size || "portrait_medium";
       var sampler = c.novalai_sampler || "";
       var samplerSel = el("cfgNovalaiSampler");
       samplerSel.value = sampler;

@@ -30,7 +30,9 @@ from .storage import load_json, save_json
 # ========== 模型详细生成参数 Schema（模块级） ==========
 # 每项定义：类型 / 范围(min,max) / 可选值(choices) / 长度上限(max_len)
 PARAM_SCHEMA = {
-    "size":             {"type": "str",   "choices": ["1K", "2K", "4K"]},
+    "size":             {"type": "str",   "choices": ["portrait_small", "portrait_medium", "portrait_large",
+                                                      "landscape_small", "landscape_medium", "landscape_large",
+                                                      "square", "1K", "2K", "4K"]},
     "temperature":      {"type": "float", "min": 0.0, "max": 2.0},
     "max_tokens":       {"type": "int",   "min": 64,  "max": 16384},
     "steps":            {"type": "int",   "min": 1,   "max": 150},
@@ -39,7 +41,7 @@ PARAM_SCHEMA = {
 
 # 各参数校验失败时的错误文案模板
 _PARAM_ERROR_MSGS = {
-    "size": "参数 size 取值无效，可选：1K/2K/4K",
+    "size": "参数 size 取值无效，可选：portrait_small/portrait_medium/portrait_large/landscape_small/landscape_medium/landscape_large/square（及旧 1K/2K/4K）",
     "temperature": "参数 temperature 超出范围（0.0-2.0）",
     "max_tokens": "参数 max_tokens 超出范围（64-16384）",
     "steps": "参数 steps 超出范围（1-150）",
@@ -67,14 +69,31 @@ NOVALAI_DEFAULT_NEGATIVE_PROMPT = ("nsfw, lowres, {bad}, error, fewer, extra, mi
                                    "jpeg artifacts, bad quality, watermark, unfinished, displeasing, "
                                    "chromatic aberration, signature, extra digits, artistic error, "
                                    "username, scan, [abstract]")
-# size 键（1K/2K/4K）→ 宽高映射（需 64 倍数，竖版 2:3 比例）
+# size 键 → 宽高映射（需 64 倍数）。固定档位：竖/横 × 小/中/大 + 方图，旧 1K/2K/4K 兼容保留
 NOVALAI_SIZE_DIMENSIONS = {
+    # 竖版（portrait）
+    "portrait_small":  (640, 1536),
+    "portrait_medium": (832, 1216),
+    "portrait_large":  (1024, 1536),
+    # 横版（landscape）
+    "landscape_small":  (1536, 640),
+    "landscape_medium": (1216, 832),
+    "landscape_large":  (1536, 1024),
+    # 方图
+    "square": (1024, 1024),
+    # 旧值兼容
     "1K": (832, 1216),
     "2K": (1152, 1664),
     "4K": (1664, 2432),
 }
-NOVALAI_DEFAULT_SIZE = "1K"
-NOVALAI_DEFAULT_WIDTH, NOVALAI_DEFAULT_HEIGHT = 832, 1216
+NOVALAI_SIZE_LABELS = {
+    "portrait_small": "竖·小 640×1536", "portrait_medium": "竖·中 832×1216",
+    "portrait_large": "竖·大 1024×1536", "landscape_small": "横·小 1536×640",
+    "landscape_medium": "横·中 1216×832", "landscape_large": "横·大 1536×1024",
+    "square": "方图 1024×1024", "1K": "1K(旧)", "2K": "2K(旧)", "4K": "4K(旧)",
+}
+NOVALAI_DEFAULT_SIZE = "portrait_medium"   # 竖中 832×1216 对齐官方默认
+NOVALAI_DEFAULT_WIDTH, NOVALAI_DEFAULT_HEIGHT = NOVALAI_SIZE_DIMENSIONS[NOVALAI_DEFAULT_SIZE]
 NOVALAI_DEFAULT_STEPS = 23          # 免费模式 steps 上限 28，付费可更大（保守用 23）
 NOVALAI_STEPS_MAX_FREE = 28         # 免费模式 steps 上限
 NOVALAI_MAX_PIXELS_FREE = 1048576   # 免费模式面积上限（px²）
@@ -202,7 +221,9 @@ def _coerce_param_value(key: str, value: Any, clamp: bool) -> tuple:
                 best = None
                 for c in choices:
                     r = _choice_rank(key, c)
-                    if r is None:
+                    if r is None or r < 0:
+                        # 不可比项（如 size 新档位键 portrait_*/landscape_*/square）不参与数值夹取：
+                        # 有效的新档位键已在上方 `value in choices` 直接命中，这里仅保留旧 1K/2K/4K 夹取语义
                         continue
                     if target is not None and r <= target and (best is None or r > _choice_rank(key, best)):
                         best = c
@@ -3441,7 +3462,7 @@ class FigurineProPlugin(Star):
         "openai_temperature": float, # 0-2
         "openai_max_tokens": int,    # 64-16384
         # NovalAI 渠道默认参数
-        "novalai_size": str,         # 1K/2K/4K（空=不指定）
+        "novalai_size": str,         # 竖/横×小中大档位键（空=不指定；旧 1K/2K/4K 兼容）
         "novalai_sampler": str,      # 采样器
         "novalai_steps": int,        # 1-50
         "novalai_scale": float,      # CFG 0-10
@@ -4236,9 +4257,13 @@ class FigurineProPlugin(Star):
                 elif expected is str:
                     if not isinstance(value, str):
                         return error_response(f"字段 {key} 必须为字符串")
-                    # 渠道 size 字段：仅允许 1K/2K/4K 或空串
-                    if key in ("openai_size", "novalai_size") and value.strip() not in ("", "1K", "2K", "4K"):
+                    # 渠道 size 字段：openai 仅 1K/2K/4K；novalai 接受新档位键 + 旧值，非法回退默认
+                    if key == "openai_size" and value.strip() not in ("", "1K", "2K", "4K"):
                         return error_response(f"字段 {key} 只能为 1K/2K/4K 或空")
+                    elif key == "novalai_size":
+                        v = value.strip()
+                        if v and v not in NOVALAI_SIZE_DIMENSIONS:
+                            value = NOVALAI_DEFAULT_SIZE  # 非法值回退默认
                 config_updates[key] = value
                 saved.append(key)
             if config_updates:
