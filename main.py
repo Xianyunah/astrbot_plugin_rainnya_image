@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 import functools
 import io
 import json
@@ -12,6 +13,7 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from urllib.parse import urlparse
 
 from PIL import Image as PILImage
 
@@ -416,7 +418,7 @@ def _rejoin_prompt_list(items: List[Any]) -> List[str]:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.1.9",
+    "1.2.0",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
@@ -449,6 +451,8 @@ class FigurineProPlugin(Star):
         self._counts_lock = asyncio.Lock()   # 用户/群组次数 check-modify-write 串行化锁（防并发竞态）
         self._bg_tasks: set = set()          # 后台生图任务引用集合（防 GC + terminate 时回收）
         self._log_page_msgid: Dict[Any, Any] = {}  # (会话, 发送者) -> {"msgid": 消息id, "page": 页码, "scope": 范围, "count": 条数}
+        self._pending_text_to_image: Dict[str, Dict[str, Any]] = {}  # 兼容旧版待确认文生图
+        self._pending_generation_tasks: Dict[str, Dict[str, Any]] = {}  # 8位校验码绑定的交互式调参与确认生图任务池
         self.prompt_map: Dict[str, str] = {}
         self._last_artist_recommendation: str = ""  # 最近一次画师推荐结果（供 画师串保存 落库）
         self.iwf: Optional[ImageWorkflow] = None
@@ -517,11 +521,11 @@ class FigurineProPlugin(Star):
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
         proxy_url = self.conf.get("proxy_url") if use_proxy else None
-        
+
         # 获取下载配置
         dl_timeout = self.conf.get("download_timeout", 60)
         dl_retries = self.conf.get("download_retries", 3)
-        
+
         self.iwf = ImageWorkflow(proxy_url, timeout=dl_timeout, retries=dl_retries)
         await self._load_prompt_map()
         await self._load_user_counts()
@@ -567,7 +571,7 @@ class FigurineProPlugin(Star):
             self.group_task_limit = 0
             logger.warning(f"NewImage: group_task_limit 配置无效 ({limit_raw})，已按 0 处理")
         self.group_task_counts.clear()
-        
+
         # 加载 Gemini 模式配置
         self.is_gemini_api = bool(self.conf.get("is_gemini_api", False))
         self.safety_level = (self.conf.get("safety_level", "") or "").strip()
@@ -581,7 +585,7 @@ class FigurineProPlugin(Star):
                 logger.info(f"  默认图片分辨率: {self.default_image_size}")
             if self.hires_whitelist:
                 logger.info(f"  高分辨率白名单: {len(self.hires_whitelist)} 人")
-        
+
         # 多提供商已由 _load_providers 加载（providers.json），此处仅输出状态
         if not self.providers:
             logger.warning("NewImage: 未配置任何提供商，插件可能无法工作")
@@ -623,9 +627,13 @@ class FigurineProPlugin(Star):
                 continue  # 禁用的提供商不参与可用模型列表
             if not str(p.get("base_url", "") or "").strip():
                 continue  # base_url 为空的提供商不可用，其模型不进可用列表（避免被当作默认模型）
-            # user_url 缺省取 base_url；novalai 官方默认用 image.novelai.net
+            # user_url 缺省取 base_url；novalai 官方默认用 api.novelai.net 账户端点
             if not str(p.get("user_url", "") or "").strip():
-                p["user_url"] = str(p.get("base_url", "") or "").strip() or NOVALAI_DEFAULT_BASE_URL
+                b_url = str(p.get("base_url", "") or "").strip()
+                if "image.novelai.net" in b_url:
+                    p["user_url"] = "https://api.novelai.net"
+                else:
+                    p["user_url"] = b_url or "https://api.novelai.net"
             pid = str(p.get("id", ""))
             for m in (p.get("models") or []):
                 if not isinstance(m, dict):
@@ -848,6 +856,55 @@ class FigurineProPlugin(Star):
                 lines.append(f"{name};{quota}")
         return lines, None
 
+    def _validate_and_normalize_models(self, models: List[Any]) -> tuple:
+        """在 JSON 对象层严格校验并规范化模型列表，杜绝分号序列化截断与反序列化崩溃隐患。
+
+        返回 (normalized_models, error)：
+        成功时 error 为 None；校验失败时 error 为错误描述。
+        """
+        normalized: List[Dict[str, Any]] = []
+        seen: set = set()
+        for m in models:
+            if not isinstance(m, dict):
+                return [], "models 元素必须是对象"
+            name = str(m.get("name", "")).strip()
+            if not name:
+                return [], "模型名不能为空"
+            if name in seen:
+                continue  # 去重，保留第一项
+            seen.add(name)
+            try:
+                quota = int(m.get("quota", 1))
+            except (TypeError, ValueError):
+                return [], f"模型 {name} 的配额必须为整数"
+            if quota < 1:
+                return [], f"模型 {name} 的配额必须 >= 1"
+            desc = str(m.get("desc", "") or "").strip()
+            raw_params = m.get("params")
+            if raw_params is None:
+                params = {}
+            elif isinstance(raw_params, dict):
+                params, _ = self._sanitize_params(raw_params, "WebUI")
+            else:
+                params = {}
+            allowed_sizes = m.get("allowed_sizes")
+            if allowed_sizes is not None:
+                if not isinstance(allowed_sizes, list) or not all(
+                        isinstance(s, str) and s in _ALLOWED_SIZE_VALUES for s in allowed_sizes):
+                    return [], f"模型 {name} 的 allowed_sizes 只能包含 1K/2K/4K 字符串数组或 null"
+                if not allowed_sizes:
+                    allowed_sizes = None
+                else:
+                    allowed_sizes = list(dict.fromkeys(allowed_sizes))
+            normalized.append({
+                "name": name,
+                "quota": quota,
+                "desc": desc,
+                "params": params,
+                "allowed_sizes": allowed_sizes,
+            })
+        return normalized, None
+
     def _get_model_entry(self, name: str) -> Optional[Dict]:
         """按模型名查 available_models（含 params），找不到返回 None。"""
         if not name:
@@ -1018,14 +1075,15 @@ class FigurineProPlugin(Star):
         if not text: return
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
-        cmd = text.split()[0].strip()
+        raw_cmd = text.split()[0].strip()
+        clean_cmd = re.sub(r'^[#/!！>>\s]+', '', raw_cmd).strip()
         bnn_command = self.conf.get("extra_prefix", "bnn")
         user_prompt = ""
         is_bnn = False
         extracted_size = None  # 用户指定的分辨率参数
         gen_params: Dict = {}  # 用户通过键:值显式指定的生成参数（显式 > 模型默认）
-        if cmd == bnn_command:
-            user_prompt = text.removeprefix(cmd).strip()
+        if raw_cmd == bnn_command or clean_cmd == bnn_command:
+            user_prompt = text[len(raw_cmd):].strip()
             # 清除 @ 文本残留
             user_prompt = re.sub(r'@\S+?\(\d+\)', '', user_prompt).strip()
             user_prompt = re.sub(r'@\S+', '', user_prompt).strip()
@@ -1048,9 +1106,10 @@ class FigurineProPlugin(Star):
             if not user_prompt:
                 yield event.plain_result("📝 用法：bnn <你的绘画想法> size:4K temperature:0.9")
                 return
-        elif cmd in self.prompt_map:
+        elif clean_cmd in self.prompt_map:
+            cmd = clean_cmd
             preset_prompt = self.prompt_map.get(cmd)
-            extra_text = text.removeprefix(cmd).strip()
+            extra_text = text[len(raw_cmd):].strip()
             # 清除 @ 文本残留（如 "@昵称(123456)"），避免被当成补充 prompt 传给 API
             extra_text = re.sub(r'@\S+?\(\d+\)', '', extra_text).strip()
             extra_text = re.sub(r'@\S+', '', extra_text).strip()
@@ -1095,113 +1154,164 @@ class FigurineProPlugin(Star):
         display_cmd = cmd
         if is_bnn:
             MAX_IMAGES = MAX_IMAGES_PER_REQUEST
-            original_count = len(img_bytes_list)
+            original_count = len(img_bytes_list) if img_bytes_list else 0
             if original_count > MAX_IMAGES:
                 images_to_process = img_bytes_list[:MAX_IMAGES]
-                initial_messages.append(f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…")
             else:
-                images_to_process = img_bytes_list
-            display_cmd = user_prompt[:DISPLAY_PROMPT_LEN] + '...' if len(user_prompt) > DISPLAY_PROMPT_LEN else user_prompt
-            initial_messages.append(f"🎨 检测到 {len(images_to_process)} 张图片，正在生成 [{display_cmd}]...")
+                images_to_process = img_bytes_list or []
         else:
             if not img_bytes_list:
-                yield event.plain_result("请发送或引用一张图片。");
+                yield event.plain_result("请发送或引用一张图片。")
                 return
             images_to_process = [img_bytes_list[0]]
-            
-            # 处理预设+补充的显示逻辑（清除 @ 文本避免显示中出现 @昵称）
-            full_cmd_text = re.sub(r'@\S+?\(\d+\)', '', text).strip()
-            full_cmd_text = re.sub(r'@\S+', '', full_cmd_text).strip()
-            display_cmd = full_cmd_text[:DISPLAY_CMD_LEN] + '...' if len(full_cmd_text) > DISPLAY_CMD_LEN else full_cmd_text
-            initial_messages.append(f"🎨 收到请求，正在生成 [{display_cmd}]...")
 
-        slot_acquired = False
-        try:
-            if not await self._acquire_group_slot(group_id):
-                if self.group_task_limit > 0:
-                    yield event.plain_result(f"⚠️ 当前本群已有 {self.group_task_limit} 个生成任务正在处理，请稍后再试。")
-                else:
-                    yield event.plain_result("⚠️ 当前生成任务过多，请稍后再试。")
-                return
-            slot_acquired = True
+        task_code = self._new_task_code()
+        task_info = {
+            "task_code": task_code,
+            "user_id": sender_id,
+            "group_id": group_id,
+            "session_id": event.get_session_id() or "direct",
+            "command_type": f"预设[{cmd}]" if not is_bnn else "自定义Prompt",
+            "prompt": user_prompt,
+            "extracted_size": extracted_size,
+            "gen_params": gen_params or {},
+            "model": self._expected_model_name(group_id),
+            "image_bytes_list": images_to_process,
+            "created_at": time.time(),
+            "is_master": is_master,
+        }
+        self._pending_generation_tasks[task_code] = task_info
+        title_tag = f"预设 [{cmd}]" if not is_bnn else "自定义生图"
+        yield event.plain_result(self._render_task_card(task_info, f"{title_tag} 任务已就绪，请核对或调整参数："))
 
-            for msg in initial_messages:
-                yield event.plain_result(msg)
+    def _new_task_code(self) -> str:
+        """生成 8 位字符数字随机校验码（排除易混淆字符 0/O/1/I）。"""
+        chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        self._clean_expired_tasks()
+        while True:
+            code = "".join(random.choice(chars) for _ in range(8))
+            if code not in self._pending_generation_tasks:
+                return code
 
-            start_time = datetime.now()
-            res, used_model = await self._call_api(images_to_process, user_prompt, image_size=extracted_size,
-                                                   group_id=group_id, gen_params=gen_params or None,
-                                                   size_strict=True)
-            elapsed = (datetime.now() - start_time).total_seconds()
-            if isinstance(res, bytes):
-                if not is_master:
-                    # 扣除次数（群组优先于个人，管理员豁免）；按实际使用模型的配额扣
-                    await self._consume_quota(sender_id, group_id, count=self._get_model_quota(used_model))
-                # 落盘 + 记录时间线
+    def _clean_expired_tasks(self) -> None:
+        """清理已过期（>600秒）的生图待确认调参任务。"""
+        now = time.time()
+        expired = [c for c, t in self._pending_generation_tasks.items() if now - float(t.get("created_at", 0)) > 600]
+        for c in expired:
+            self._pending_generation_tasks.pop(c, None)
+
+    async def _extract_task_code_from_event(self, event: AstrMessageEvent) -> tuple:
+        """从引用回复中提取第一行的 8 位生图任务校验码。
+
+        返回 (task_code, error_message)。
+        若成功提取返回 (code, None)；若未引用或提取失败返回 (None, err)。
+        """
+        reply_seg = next((s for s in event.message_obj.message if isinstance(s, Reply)), None)
+        if not reply_seg:
+            return None, "⚠️ 必须【引用回复】机器人发送的包含【任务校验码】的消息才能调整参数或确认生图喵！"
+
+        reply_text = ""
+        if getattr(reply_seg, "chain", None):
+            for item in reply_seg.chain:
+                if isinstance(item, Plain):
+                    reply_text += item.text
+                elif isinstance(item, str):
+                    reply_text += item
+
+        reply_id = getattr(reply_seg, "id", None)
+        if not reply_text and reply_id is not None:
+            call = self._resolve_call_action(event)
+            if call:
                 try:
-                    await self._save_generation(group_id, sender_id, user_prompt, used_model, res)
+                    res = await call("get_msg", message_id=reply_id)
+                    if isinstance(res, dict) and "data" in res:
+                        res = res["data"]
+                    if isinstance(res, dict):
+                        segs = res.get("message")
+                        if isinstance(segs, list):
+                            for s in segs:
+                                if isinstance(s, dict) and s.get("type") == "text":
+                                    reply_text += s.get("data", {}).get("text", "")
+                        elif isinstance(res.get("raw_message"), str):
+                            reply_text = res["raw_message"]
                 except Exception as e:
-                    logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
-                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"预设: {display_cmd}", f"模型: {used_model}"]
-                if is_master:
-                    caption_parts.append("剩余次数: ∞")
-                else:
-                    if self.conf.get("enable_user_limit", True): caption_parts.append(
-                        f"个人剩余: {self._get_user_count(sender_id)}")
-                    if self.conf.get("enable_group_limit", False) and group_id: caption_parts.append(
-                        f"本群剩余: {self._get_group_count(group_id)}")
-                caption = " | ".join(caption_parts)
-                send_res = await self._send_image_with_recall(event, res, caption)
-                if send_res == "USE_CHAIN_RESULT":
-                    yield event.chain_result([Image.fromBytes(res), Plain(caption)])
-                elif send_res:
-                    yield event.plain_result(f"❌ 发送失败: {send_res}")
-            else:
-                yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
-        finally:
-            if slot_acquired:
-                await self._release_group_slot(group_id)
-        event.stop_event()
+                    logger.debug(f"[NewImage] get_msg 获取引用文本失败: {e}")
 
-    @filter.command("文生图", prefix_optional=True)
-    async def on_text_to_image_request(self, event: AstrMessageEvent):
-        prompt = event.message_str.strip()
-        prompt = prompt.removeprefix("文生图").strip()  # 剥指令名，完整保留多词描述，不依赖 parsed_params
-        if not prompt:
-            yield event.plain_result("📝 用法：文生图 <画面描述>\n"
-                                     "可加参数：>>文生图 model:模型名 size:portrait_medium steps:28 negative_prompt:\"bad hands\" 一个女孩...\n"
-                                     "参数详解见 >>生图帮助")
-            return
+        # 正则匹配第一行的任务校验码
+        match = re.search(r"任务校验码[:：\s]*([A-Za-z0-9]{8})", reply_text)
+        if match:
+            return match.group(1).upper(), None
 
-        sender_id = event.get_sender_id()
-        group_id = event.get_group_id()
-        is_master = self.is_global_admin(event)
-        
-        # 从文生图 prompt 中提取分辨率（仅白名单用户 + Gemini 提供商）
-        extracted_size = None
-        prompt, extracted_size = self._extract_image_size(prompt, sender_id, group_id=group_id)
-        # 提取生成参数（键:值），校验失败明确报错不生成；支持 model: 指定本次生图模型（透传 allowed_extra）
-        gen_params, prompt = self._parse_and_validate_params(prompt, {"model": "str"})
-        if gen_params is None:
-            yield event.plain_result(f"❌ {prompt}")
-            return
-        model_override = ""
-        if gen_params and "model" in gen_params:
-            model_override = str(gen_params.pop("model") or "").strip()
-        if not prompt:
-            yield event.plain_result("请提供文生图的描述（分辨率参数不能作为唯一输入）。")
-            return
+        raw_cmd = event.message_str.strip()
+        code_match = re.search(r"\b([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})\b", raw_cmd.upper())
+        if code_match and code_match.group(1) in self._pending_generation_tasks:
+            return code_match.group(1), None
 
-        # --- 权限和次数检查 ---
+        return None, "❌ 引用的消息中未找到有效的 8 位【任务校验码】，请确认是否引用了正确的生图调参消息喵。"
+
+    def _render_task_card(self, task_info: Dict[str, Any], title: str = "生图任务已就绪，请核对或调整参数：") -> str:
+        """渲染标准化调参卡片，第一行严格呈现【任务校验码: XXXXXXXX】。"""
+        code = task_info["task_code"]
+        prompt = task_info.get("prompt", "")
+        preview = prompt[:DISPLAY_PROMPT_LEN] + "..." if len(prompt) > DISPLAY_PROMPT_LEN else prompt
+        model = task_info.get("model", "")
+        quota = self._get_model_quota(model)
+        gen_params = task_info.get("gen_params", {})
+        image_bytes_list = task_info.get("image_bytes_list", [])
+        has_ref = bool(image_bytes_list)
+        mode = "图+文生图" if has_ref else task_info.get("command_type", "文生图")
+
+        lines = [
+            f"【任务校验码: {code}】",
+            f"🎨 {title}",
+            "━━━━━━━━━━━━━━",
+            f"📝 模式：{mode}",
+            f"💬 提示词：{preview}",
+            f"🤖 当前模型：{model}（消耗 {quota} 次配额）",
+        ]
+        if has_ref:
+            lines.append(f"🖼️ 参考图：{len(image_bytes_list)} 张")
+
+        param_desc = []
+        if task_info.get("extracted_size"):
+            param_desc.append(f"size={task_info['extracted_size']}")
+        for k, v in gen_params.items():
+            param_desc.append(f"{k}={v}")
+        if param_desc:
+            lines.append("⚙️ 当前参数：" + ", ".join(param_desc))
+        else:
+            lines.append("⚙️ 当前参数：默认设置")
+
+        lines.extend([
+            "━━━━━━━━━━━━━━",
+            "💡 调参及确认说明（必须【引用回复】本条消息）：",
+            "• 调整参数：>>生图 参数 size:portrait_large steps:28",
+            "• 更换模型：>>生图 模型 2（或具体模型名）",
+            "• 确认出图：>>生图 确认",
+            "• 取消任务：>>生图 取消",
+            "（⏳ 10分钟内有效，支持多次调整参数）",
+        ])
+        return "\n".join(lines)
+
+    async def _execute_confirmed_generation(self, event: AstrMessageEvent, task_info: Dict[str, Any]):
+        """执行已确认的生图任务（统一配额、并发槽位、生图与落盘发送）。"""
+        sender_id = task_info["user_id"]
+        group_id = task_info.get("group_id")
+        is_master = task_info.get("is_master", False)
+        prompt = task_info.get("prompt", "")
+        extracted_size = task_info.get("extracted_size")
+        gen_params = task_info.get("gen_params", {})
+        model_override = task_info.get("model", "")
+        image_bytes_list = task_info.get("image_bytes_list", [])
+        has_reference_image = bool(image_bytes_list)
+
         if not is_master:
             if sender_id in self.conf.get("user_blacklist", []): return
             if group_id and group_id in self.conf.get("group_blacklist", []): return
             if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []): return
-            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist",
-                                                                                                   []): return
-            # 次数配额检查（与图生图 / LLM 工具共用 _check_usage_quota）
-            # 按预期模型配额预检（多配额模型按真实消耗扣，见 _consume_quota 处）
-            _expected_quota = self._get_model_quota(self._expected_model_name(group_id))
+            if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist", []): return
+
+            _expected_quota = self._get_model_quota(model_override or self._expected_model_name(group_id))
             err = self._check_usage_quota(sender_id, group_id, _expected_quota)
             if err:
                 yield event.plain_result(err)
@@ -1218,26 +1328,25 @@ class FigurineProPlugin(Star):
                 return
             slot_acquired = True
 
-            yield event.plain_result(f"🎨 收到文生图请求，正在生成 [{display_prompt}]...")
+            mode_label = "图+文生图" if has_reference_image else "文生图"
+            image_label = f"（检测到 {len(image_bytes_list)} 张参考图）" if has_reference_image else ""
+            yield event.plain_result(f"🎨 收到{mode_label}请求{image_label}，正在生成 [{display_prompt}]...")
 
             start_time = datetime.now()
-            # 调用通用API，但传入空的图片列表
-            res, used_model = await self._call_api([], prompt, image_size=extracted_size, group_id=group_id,
+            res, used_model = await self._call_api(image_bytes_list, prompt, image_size=extracted_size, group_id=group_id,
                                                    gen_params=gen_params or None, size_strict=True,
                                                    model_override=model_override or None)
             elapsed = (datetime.now() - start_time).total_seconds()
 
             if isinstance(res, bytes):
                 if not is_master:
-                    # 扣除次数（群组优先于个人，管理员豁免）；按实际使用模型的配额扣
                     await self._consume_quota(sender_id, group_id, count=self._get_model_quota(used_model))
-                # 落盘 + 记录时间线
                 try:
                     await self._save_generation(group_id, sender_id, prompt, used_model, res)
                 except Exception as e:
                     logger.error(f"[NewImage] 保存生图记录失败: {e}", exc_info=True)
 
-                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", f"模型: {used_model}"]
+                caption_parts = [f"✅ {'图+文生图' if has_reference_image else '文生图'}成功 ({elapsed:.2f}s)", f"模型: {used_model}"]
                 if is_master:
                     caption_parts.append("剩余次数: ∞")
                 else:
@@ -1257,6 +1366,144 @@ class FigurineProPlugin(Star):
             if slot_acquired:
                 await self._release_group_slot(group_id)
         event.stop_event()
+
+    @filter.command("生图", prefix_optional=True)
+    async def on_generation_interactive(self, event: AstrMessageEvent):
+        """交互式生图调参、确认与取消中心（必须【引用回复】机器人发出的调参卡片）。"""
+        sender_id = str(event.get_sender_id() or "")
+        is_master = self.is_global_admin(event)
+
+        task_code, err = await self._extract_task_code_from_event(event)
+        if not task_code:
+            yield event.plain_result(err)
+            return
+
+        self._clean_expired_tasks()
+        task_info = self._pending_generation_tasks.get(task_code)
+        if not task_info:
+            yield event.plain_result(f"❌ 未找到任务 [{task_code}]（任务可能已过期或已完成），请重新发送生图指令发起新任务喵。")
+            return
+
+        if task_info["user_id"] != sender_id and not is_master:
+            yield event.plain_result("❌ 该任务由其他成员发起，您无法操作该任务喵。")
+            return
+
+        raw_cmd = event.message_str.strip()
+        action_text = re.sub(r'^[#/!！>>\s]*生图\s*', '', raw_cmd).strip()
+        if not action_text:
+            yield event.plain_result(self._render_task_card(task_info, "当前任务状态："))
+            return
+
+        parts = action_text.split(maxsplit=1)
+        sub_cmd = parts[0].lower()
+        sub_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub_cmd in ("确认", "确认生图", "ok", "start", "run", "go"):
+            self._pending_generation_tasks.pop(task_code, None)
+            async for res in self._execute_confirmed_generation(event, task_info):
+                yield res
+            return
+
+        if sub_cmd in ("取消", "取消生图", "cancel", "del", "stop"):
+            self._pending_generation_tasks.pop(task_code, None)
+            yield event.plain_result(f"✅ 已取消生图任务 [{task_code}]。")
+            return
+
+        if sub_cmd in ("模型", "model"):
+            if not sub_arg:
+                lines = "\n".join(f"[{i+1}] {m['name']} (消耗{m['quota']}次)" for i, m in enumerate(self.available_models))
+                yield event.plain_result(f"📋 可用模型列表：\n{lines}\n请回复：>>生图 模型 <序号或名称>")
+                return
+            new_model = ""
+            if sub_arg.isdigit():
+                idx = int(sub_arg)
+                if 1 <= idx <= len(self.available_models):
+                    new_model = self.available_models[idx - 1]["name"]
+            else:
+                match_m = next((m["name"] for m in self.available_models if m["name"].lower() == sub_arg.lower()), None)
+                if match_m:
+                    new_model = match_m
+                else:
+                    new_model = sub_arg
+            if new_model:
+                task_info["model"] = new_model
+                task_info["created_at"] = time.time()
+                yield event.plain_result(self._render_task_card(task_info, f"✅ 已更换模型为 [{new_model}]！"))
+            else:
+                yield event.plain_result(f"❌ 找不到模型 {sub_arg}")
+            return
+
+        if sub_cmd in ("参数", "param", "params", "set") or any(k in sub_cmd for k in ("size:", "steps:", "scale:", "temp:", "temperature:", "negative_prompt:")):
+            param_str = action_text.removeprefix("参数").strip() if action_text.startswith("参数") else action_text
+            params, cleaned = self._parse_and_validate_params(param_str, {"model": "str"})
+            if params is None:
+                yield event.plain_result(f"❌ 参数格式有误: {cleaned}")
+                return
+            if "model" in params:
+                task_info["model"] = params.pop("model")
+            task_info["gen_params"].update(params)
+            task_info["created_at"] = time.time()
+            yield event.plain_result(self._render_task_card(task_info, "✅ 参数已更新！"))
+            return
+
+        yield event.plain_result("💡 指令说明（必须【引用回复】）：\n"
+                                 "• 调整参数：>>生图 参数 size:portrait_large steps:28\n"
+                                 "• 更换模型：>>生图 模型 2\n"
+                                 "• 确认出图：>>生图 确认\n"
+                                 "• 取消任务：>>生图 取消")
+
+    @filter.command("文生图", prefix_optional=True)
+    async def on_text_to_image_request(self, event: AstrMessageEvent):
+        raw_command = event.message_str.strip()
+        prompt = re.sub(r'^[#/!！>>\s]*文生图\s*', '', raw_command).strip()
+        sender_id = str(event.get_sender_id() or "")
+        group_id = event.get_group_id()
+        is_master = self.is_global_admin(event)
+        session_id = event.get_session_id() or "direct"
+
+        # 兼容旧确认格式：如果用户使用 >>文生图 确认生图 且引用了回复，自动转给生图交互器
+        if prompt in ("确认生图", "确认") and any(isinstance(s, Reply) for s in event.message_obj.message):
+            async for res in self.on_generation_interactive(event):
+                yield res
+            return
+
+        if not prompt:
+            yield event.plain_result("📝 用法：>>文生图 <提示词内容>\n"
+                                     "发送后机器人将发送带【任务校验码】的调参卡片；\n"
+                                     "请【引用回复】该卡片并发送 `>>生图 参数 xxxxx` 调参，或 `>>生图 确认` 出图。")
+            return
+
+        extracted_size = None
+        prompt, extracted_size = self._extract_image_size(prompt, sender_id, group_id=group_id)
+        gen_params, prompt = self._parse_and_validate_params(prompt, {"model": "str"})
+        if gen_params is None:
+            yield event.plain_result(f"❌ {prompt}")
+            return
+        model_override = ""
+        if gen_params and "model" in gen_params:
+            model_override = str(gen_params.pop("model") or "").strip()
+        if not prompt:
+            yield event.plain_result("请提供文生图的描述。")
+            return
+
+        image_bytes_list = await self._extract_event_images(event)
+        task_code = self._new_task_code()
+        task_info = {
+            "task_code": task_code,
+            "user_id": sender_id,
+            "group_id": group_id,
+            "session_id": session_id,
+            "command_type": "图+文生图" if image_bytes_list else "文生图",
+            "prompt": prompt,
+            "extracted_size": extracted_size,
+            "gen_params": gen_params or {},
+            "model": model_override or self._expected_model_name(group_id),
+            "image_bytes_list": image_bytes_list,
+            "created_at": time.time(),
+            "is_master": is_master,
+        }
+        self._pending_generation_tasks[task_code] = task_info
+        yield event.plain_result(self._render_task_card(task_info, "生图任务已就绪，请核对或调整参数："))
 
     @filter.command("预设添加", aliases={"lm添加", "lma"}, prefix_optional=True)
     async def add_lm_prompt(self, event: AstrMessageEvent):
@@ -1611,12 +1858,11 @@ class FigurineProPlugin(Star):
             return
         user_id = event.get_sender_id()
         today_str = datetime.now().strftime("%Y-%m-%d")
-        if self.user_checkin_data.get(user_id) == today_str:
-            yield event.plain_result(f"您今天已经领取过喵喵赐福。\n剩余次数: {self._get_user_count(user_id)}")
-            return
-        # 检查是否已达到持有上限
-        # 用 _counts_lock 包裹「读-判-写-盘」，保证签到并发下 user_counts 修改原子
+        # 用 _counts_lock 包裹「判-读-写-盘」，保证签到并发下 user_checkin 与 user_counts 修改原子，彻底防止并发重入刷次数
         async with self._counts_lock:
+            if self.user_checkin_data.get(user_id) == today_str:
+                yield event.plain_result(f"您今天已经领取过喵喵赐福。\n剩余次数: {self._get_user_count(user_id)}")
+                return
             current_count = self._get_user_count(user_id)
             if self.user_count_cap > 0 and current_count >= self.user_count_cap:
                 yield event.plain_result(f"📦 您的生图次数已存满（{current_count}/{self.user_count_cap}），无法继续累积。\n请先使用后再来签到哦~")
@@ -1727,7 +1973,7 @@ class FigurineProPlugin(Star):
     @filter.command("生图删除key", prefix_optional=True)
     async def on_delete_key(self, event: AstrMessageEvent):
         if not self.is_global_admin(event): return
-        param = event.message_str.strip()
+        param = re.sub(r'^[#/!！>>\s]*生图删除key\s*', '', event.message_str.strip()).strip()
         api_keys = self.conf.get("api_keys", [])
         if param.lower() == "all":
             self.conf["api_keys"] = []
@@ -1752,8 +1998,7 @@ class FigurineProPlugin(Star):
         if not self.available_models:
             yield event.plain_result("📝 尚未配置可用生图模型，请在插件配置的「model」项中每行填写一个模型。")
             return
-        param = event.message_str.strip()
-        param = param.removeprefix("切换模型").strip()  # 兼容 message_str 带/不带指令名
+        param = re.sub(r'^[#/!！>>\s]*切换模型\s*', '', event.message_str.strip()).strip()
         if not param:
             # 无参数：列出模型列表
             current = self.group_models.get(group_id, "")
@@ -1786,8 +2031,7 @@ class FigurineProPlugin(Star):
         切换/关闭仅管理员可用（同「切换模型」）；私聊无法按群配置。
         """
         group_id = event.get_group_id()
-        param = event.message_str.strip()
-        param = param.removeprefix("画师串").strip()  # 兼容 message_str 带/不带指令名
+        param = re.sub(r'^[#/!！>>\s]*画师串\s*', '', event.message_str.strip()).strip()
         if not group_id:
             # 列出仍可用（公共信息），切换需群聊
             if not param:
@@ -1842,8 +2086,7 @@ class FigurineProPlugin(Star):
         `发图加密 关` → 本群禁用 NSFW 加密（LLM 画 NSFW 直接发原图）
         """
         group_id = event.get_group_id()
-        param = event.message_str.strip()
-        param = param.removeprefix("发图加密").strip()  # 兼容 message_str 带/不带指令名
+        param = re.sub(r'^[#/!！>>\s]*发图加密\s*', '', event.message_str.strip()).strip()
         if not group_id:
             yield event.plain_result("发图加密按群管理，仅支持在群聊中使用")
             return
@@ -2146,8 +2389,7 @@ class FigurineProPlugin(Star):
         if not self.conf.get("artist_recommend_enabled", False):
             yield event.plain_result("画师推荐功能未开启，请在设置中开启 artist_recommend_enabled")
             return
-        raw = event.message_str.strip()
-        raw = raw.removeprefix("画师推荐").strip()
+        raw = re.sub(r'^[#/!！>>\s]*画师推荐\s*', '', event.message_str.strip()).strip()
         if not raw:
             yield event.plain_result("📝 用法：`>>画师推荐 <画风需求>` 如：`>>画师推荐 细腻的赛博朋克厚涂`")
             return
@@ -2217,8 +2459,7 @@ class FigurineProPlugin(Star):
         if not self.is_global_admin(event):
             yield event.plain_result("仅管理员可保存画师串预设")
             return
-        param = event.message_str.strip()
-        param = param.removeprefix("画师串保存").strip()
+        param = re.sub(r'^[#/!！>>\s]*画师串保存\s*', '', event.message_str.strip()).strip()
         if not param:
             yield event.plain_result("📝 用法：`>>画师串保存 <名称>`（保存最近一次画师推荐结果）")
             return
@@ -2243,8 +2484,7 @@ class FigurineProPlugin(Star):
                  "单条查询 <时间戳>\n"
                  "删除 <时间戳>\n"
                  "删除 <群号|全局> <开始时间戳> <结束时间戳>")
-        raw = event.message_str.strip()
-        raw = raw.removeprefix("生图日志").strip()  # AstrBot 4.27.2 message_str 带指令名，需手动剥名
+        raw = re.sub(r'^[#/!！>>\s]*生图日志\s*', '', event.message_str.strip()).strip()
         if not raw:
             yield event.plain_result(usage)
             return
@@ -2280,19 +2520,26 @@ class FigurineProPlugin(Star):
         if action == "删除":
             if len(parts) == 2:
                 ts = parts[1]
+                deleted_records = []
                 async with self._history_lock:
-                    before = len(self.generation_history)
-                    self.generation_history = [r for r in self.generation_history if r.get("timestamp") != ts]
-                    removed = before - len(self.generation_history)
-                    if removed:
+                    kept = []
+                    for r in self.generation_history:
+                        if r.get("timestamp") == ts:
+                            deleted_records.append(r)
+                        else:
+                            kept.append(r)
+                    if deleted_records:
+                        self.generation_history = kept
                         await self._save_generation_history()
-                if removed:
-                    yield event.plain_result(f"✅ 已删除 {removed} 条时间戳为 {ts} 的生图记录。")
+                if deleted_records:
+                    self._delete_generation_files(deleted_records)
+                    yield event.plain_result(f"✅ 已删除 {len(deleted_records)} 条时间戳为 {ts} 的生图记录与关联文件。")
                 else:
                     yield event.plain_result(f"❌ 未找到时间戳为 {ts} 的生图记录。")
                 return
             if len(parts) == 4:
                 scope_key, start_ts, end_ts = parts[1], parts[2], parts[3]
+                deleted_records = []
                 async with self._history_lock:
                     remaining = []
                     for r in self.generation_history:
@@ -2301,18 +2548,33 @@ class FigurineProPlugin(Star):
                         in_scope = (scope_key == "全局") or (str(r.get("group_id", "")) == str(scope_key))
                         if not (in_range and in_scope):
                             remaining.append(r)
-                    removed = len(self.generation_history) - len(remaining)
-                    self.generation_history = remaining
-                    if removed:
+                        else:
+                            deleted_records.append(r)
+                    if deleted_records:
+                        self.generation_history = remaining
                         await self._save_generation_history()
-                if removed:
-                    yield event.plain_result(f"✅ 已删除 {removed} 条生图记录（范围: {scope_key}, {start_ts} ~ {end_ts}）。")
+                if deleted_records:
+                    self._delete_generation_files(deleted_records)
+                    yield event.plain_result(f"✅ 已删除 {len(deleted_records)} 条生图记录与关联文件（范围: {scope_key}, {start_ts} ~ {end_ts}）。")
                 else:
                     yield event.plain_result(f"❌ 该范围内没有生图记录。")
                 return
             yield event.plain_result("格式: 生图日志 删除 <时间戳> 或 删除 <群号|全局> <开始时间戳> <结束时间戳>")
             return
         yield event.plain_result(usage)
+
+    def _delete_generation_files(self, records: List[Dict]) -> None:
+        """物理删除生图记录对应的本地图片文件，释放磁盘空间。"""
+        for r in records:
+            fp = str(r.get("file_path", "") or "").strip()
+            if not fp:
+                continue
+            try:
+                p = Path(fp)
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"[NewImage] 物理删除生图文件失败 ({fp}): {e}")
 
     async def _handle_log_query(self, event: AstrMessageEvent, args: List[str]) -> None:
         """处理生图日志「查询」子命令：本群/全局、条数(≤20)、每页10条翻页，翻页时先撤回上一条日志消息再发新页。"""
@@ -2826,11 +3088,11 @@ class FigurineProPlugin(Star):
         # （openai/novalai 提供商模型不启用；is_gemini_api 历史配置不再参与判断）
         if not self._effective_model_is_gemini(group_id=group_id, model_override=model_override):
             return text, None
-        
+
         # 检查用户是否在高分辨率白名单中
         if sender_id not in self.hires_whitelist:
             return text, None
-        
+
         # 匹配 2K/4K（不区分大小写，支持独立出现或在开头/结尾）
         match = re.search(r'\b([24][kK])\b', text)
         if match:
@@ -2842,7 +3104,7 @@ class FigurineProPlugin(Star):
             cleaned = re.sub(r'\s{2,}', ' ', cleaned)
             logger.info(f"[NewImage] 白名单用户 {sender_id} 提取分辨率参数: {size_str}")
             return cleaned, size_str
-        
+
         return text, None
 
     async def _acquire_group_slot(self, group_id: Optional[str]) -> bool:
@@ -3101,7 +3363,7 @@ class FigurineProPlugin(Star):
             - result: bytes=生图成功 / str=失败原因
             - model_name: 本次实际使用的模型名（错误早退路径可能为 ""）
         """
-        
+
         # ========== 模型选择优先级：model_override > 本群配置模型 > available_model_names[0] 兜底 ==========
         model_name: str = ""
         if model_override:
@@ -3123,20 +3385,17 @@ class FigurineProPlugin(Star):
                 return "❌ 未配置任何生图模型，请在 WebUI 提供商管理中配置", ""
 
         # ========== 按模型定位所属提供商，取 API 配置 ==========
-        provider = self._find_provider_for_model(model_name)
+        # 优先选择包含该模型且可用的提供商（启用且 BaseURL 非空），防止被排在前面的停用/空壳提供商阻断
+        provider = self._find_usable_provider_for_model(model_name)
         if not provider:
+            any_provider = self._find_provider_for_model(model_name)
+            if any_provider:
+                pname = str(any_provider.get("name", "") or any_provider.get("id", "未命名"))
+                if not any_provider.get("enabled", True):
+                    return f"❌ 模型 {model_name} 所属提供商「{pname}」已停用，请在 WebUI 提供商管理中启用", model_name
+                if not str(any_provider.get("base_url", "") or "").strip():
+                    return f"❌ 提供商「{pname}」未配置 BaseURL，请在 WebUI 提供商管理中配置", model_name
             return f"❌ 模型 {model_name} 未关联任何提供商，请在 WebUI 提供商管理中配置", model_name
-        # 若命中的提供商 base_url 为空（旧迁移残留的 stub 提供商），优先改用真正可用的提供商
-        if not str(provider.get("base_url", "") or "").strip():
-            usable = self._find_usable_provider_for_model(model_name)
-            if usable:
-                old_name = str(provider.get("name", "") or provider.get("id", "未命名"))
-                provider = usable
-                logger.info(f"[NewImage] 提供商「{old_name}」无 BaseURL，已改用可用提供商 "
-                            f"「{provider.get('name', '') or provider.get('id', '未命名')}」")
-        if not provider.get("enabled", True):
-            provider_name_dis = str(provider.get("name", "") or provider.get("id", "未命名"))
-            return f"❌ 模型 {model_name} 所属提供商「{provider_name_dis}」已停用，请在 WebUI 提供商管理中启用", model_name
         api_url = str(provider.get("base_url", "") or "").strip()
         api_key = str(provider.get("api_key", "") or "").strip()
         provider_type = str(provider.get("type", "") or "openai").strip()
@@ -3242,16 +3501,16 @@ class FigurineProPlugin(Star):
             size        → generationConfig.imageConfig.imageSize（与指令 image_size 合并取最高优先级）
             negative_prompt / steps / 其他透传键 → generationConfig.imageConfig 扩展字段
         """
-        
+
         # 构建 Gemini 格式的 endpoint
         api_url = api_url.rstrip("/")
         version = "v1beta"
         endpoint_base = api_url if f"/{version}" in api_url else f"{api_url}/{version}"
         endpoint = f"{endpoint_base}/models/{model_name}:generateContent?key={api_key}"
-        
+
         # 构建请求体 parts
         parts: List[Dict[str, Any]] = []
-        
+
         # 添加输入图片
         for img_bytes in image_bytes_list:
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
@@ -3261,14 +3520,14 @@ class FigurineProPlugin(Star):
                     "data": img_b64
                 }
             })
-        
+
         # 添加文本提示
         if prompt:
             parts.append({"text": prompt})
-        
+
         if not parts:
             return "缺少 prompt 或图片内容"
-        
+
         request_body: Dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
@@ -3300,7 +3559,7 @@ class FigurineProPlugin(Star):
                     image_config[pk] = pv  # steps 及透传键原样透传
         if image_config:
             request_body["generationConfig"]["imageConfig"] = image_config
-        
+
         # 添加安全过滤设置
         if self.safety_level:
             categories = [
@@ -3312,9 +3571,9 @@ class FigurineProPlugin(Star):
             request_body["safetySettings"] = [
                 {"category": cat, "threshold": self.safety_level} for cat in categories
             ]
-        
+
         logger.info(f"[NewImage/Gemini] 发送请求 [{source_info}]: Model={model_name}, HasImage={bool(image_bytes_list)}")
-        
+
         try:
             if not self.iwf:
                 return "ImageWorkflow 未初始化"
@@ -3331,9 +3590,9 @@ class FigurineProPlugin(Star):
                     if resp.status >= 500:
                         return f"⚠️ API 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
                     return f"Gemini API请求失败 (HTTP {resp.status}): {error_text[:300]}"
-                
+
                 data = await resp.json()
-                
+
                 # 解析 Gemini 响应
                 candidates = data.get("candidates", [])
                 for candidate in candidates:
@@ -3348,12 +3607,12 @@ class FigurineProPlugin(Star):
                             b64_data = inline.get("data", "")
                             if b64_data:
                                 return base64.b64decode(b64_data)
-                
+
                 # 检查是否有错误信息
                 if "error" in data:
                     err = data["error"]
                     return f"Gemini API 错误: {err.get('message', json.dumps(err))}"
-                
+
                 # 检查安全过滤
                 if candidates:
                     finish_reason = candidates[0].get("finishReason", "")
@@ -3364,7 +3623,7 @@ class FigurineProPlugin(Star):
                             cats = ", ".join(r.get("category", "?") for r in blocked)
                             return f"⚠️ 内容被安全过滤器拦截: {cats}\n提示：可在配置中调整安全过滤等级。"
                         return "⚠️ 内容被安全过滤器拦截。提示：可在配置中调整安全过滤等级。"
-                
+
                 error_msg = f"Gemini 响应中未找到图像数据: {str(data)[:500]}..."
                 logger.error(error_msg)
                 return error_msg
@@ -3386,7 +3645,7 @@ class FigurineProPlugin(Star):
             size        → payload.size（str）
             negative_prompt / steps / 其他透传键 → payload.extra_body 扩展字段
         """
-        
+
         # 处理 API URL 格式
         api_url = api_url.rstrip("/")
         if re.search(r"/v\d+/(chat|images)/", api_url):
@@ -3395,7 +3654,7 @@ class FigurineProPlugin(Star):
             api_url = api_url + "/chat/completions"
         else:
             api_url = api_url + "/v1/chat/completions"
-        
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -3469,7 +3728,7 @@ class FigurineProPlugin(Star):
                     return f"API请求失败 (HTTP {resp.status}): {error_text[:200]}"
 
                 content_type = resp.headers.get("Content-Type", "")
-                
+
                 if "text/event-stream" in content_type:
                     logger.info("[NewImage] 检测到 SSE 流式响应，开始拼接 chunks")
                     full_content = ""
@@ -3497,7 +3756,7 @@ class FigurineProPlugin(Star):
 
                 if isinstance(result, bytes):
                     return result
-                
+
                 if isinstance(result, str) and result.startswith("FALLBACK_URL:"):
                     fallback_url = result[len("FALLBACK_URL:"):]
                     logger.warning(f"图片下载失败，返回备用URL供用户访问: {fallback_url}")
@@ -3647,13 +3906,14 @@ class FigurineProPlugin(Star):
         # ========== 端点 & 请求头 ==========
         base = api_url.rstrip("/")
         endpoint = f"{base}/ai/generate-image"
+        parsed_authority = urlparse(endpoint).netloc or "image.novelai.net"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "Origin": "https://novelai.net",
             "Referer": "https://novelai.net",
             "User-Agent": NOVALAI_UA,
-            "authority": "api.novelai.net",
+            "authority": parsed_authority,
         }
 
         logger.info(f"[NewImage/NovelAI] 发送请求 [{source_info}]: Model={model_name}, "
@@ -3970,8 +4230,13 @@ class FigurineProPlugin(Star):
             (f"{base}/config", self._web_config_post, ["POST"], "保存全部设置（白名单字段，一次性原子落盘）"),
             (f"{base}/artist-presets", self._web_artist_presets_get, ["GET"], "获取画师串预设库"),
             (f"{base}/artist-presets", self._web_artist_presets_post, ["POST"], "保存画师串预设库"),
+            (f"{base}/artist-presets/export", self._web_artist_presets_export, ["GET"], "导出画师串预设库为 JSON"),
+            (f"{base}/artist-presets/import", self._web_artist_presets_import, ["POST"], "智能导入画师串预设（支持Rainnya/AstrBot幻笔/云崽幻笔）"),
+            (f"{base}/artist-presets/detect-nai-brush", self._web_artist_presets_detect_nai_brush, ["GET"], "探测本地已安装的 AstrBot 幻笔插件画师预设"),
             (f"{base}/artist-presets/group", self._web_artist_groups_get, ["GET"], "获取各群画师串激活映射"),
             (f"{base}/artist-presets/group", self._web_artist_groups_post, ["POST"], "设置某群画师串预设"),
+            (f"{base}/workbench/models", self._web_workbench_models, ["GET"], "获取生图测试台可用模型与提供商详情"),
+            (f"{base}/workbench/generate", self._web_workbench_generate, ["POST"], "生图测试台出图接口"),
         ]
         for route, handler, methods, desc in endpoints:
             self.context.register_web_api(route, handler, methods, desc)
@@ -4070,7 +4335,7 @@ class FigurineProPlugin(Star):
                 "user_url": str(payload.get("user_url", "") or "").strip(),
                 "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
                 "enabled": True,
-                "models": list(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
+                "models": copy.deepcopy(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
             }
             self.providers.append(provider)
             await self._save_providers()
@@ -4186,11 +4451,11 @@ class FigurineProPlugin(Star):
             models = payload.get("models")
             if not isinstance(models, list):
                 return error_response("models 必须是数组")
-            # 复用旧 /models 的校验/序列化逻辑（抽成公共方法），经行格式 round-trip 后落盘 dict
-            lines, err = self._serialize_models_lines(models)
+            # 采用纯 JSON 对象层清洗校验，杜绝分号序列化截断与反序列化解析失败
+            normalized_models, err = self._validate_and_normalize_models(models)
             if err:
                 return error_response(err)
-            target["models"] = self._parse_models_lines(lines)
+            target["models"] = normalized_models
             await self._save_providers()
             await self._load_providers()
             return json_response({"ok": True, "count": len(target["models"])})
@@ -4400,9 +4665,12 @@ class FigurineProPlugin(Star):
                 else:
                     return error_response("需要提供 timestamps 或 scope+start+end")
                 removed = len(self.generation_history) - len(remaining)
+                deleted_records = [r for r in self.generation_history if r not in remaining]
                 if removed:
                     self.generation_history = remaining
                     await self._save_generation_history()
+            if deleted_records:
+                self._delete_generation_files(deleted_records)
             return json_response({"ok": True, "deleted": removed})
         except Exception as e:
             return error_response(str(e))
@@ -4519,6 +4787,192 @@ class FigurineProPlugin(Star):
             await self._save_artist_presets()
             await self._load_artist_presets()
             return json_response({"ok": True, "count": len(self.artist_presets)})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_artist_presets_export(self):
+        """GET {base}/artist-presets/export：导出画师串预设库为标准分享 JSON。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = {
+                "format": "rainnya_artist_presets",
+                "version": "1.2.0",
+                "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "count": len(self.artist_presets),
+                "presets": self.artist_presets,
+            }
+            return json_response(payload)
+        except Exception as e:
+            return error_response(str(e))
+
+    def _parse_imported_artist_presets(self, data: Any) -> tuple:
+        """智能解析多源画师预设：支持 Rainnya 导出包、AstrBot 幻笔插件配置/预设、云崽幻笔 Key-Value 格式。
+
+        返回 (parsed_presets, detected_source_name)：
+        成功解析返回 List[Dict]，失败抛出 ValueError。
+        """
+        parsed: List[Dict[str, str]] = []
+        source_name = "未知格式"
+        seen: set = set()
+
+        def _add_preset(name: str, artists: str, negative: str = ""):
+            name = str(name or "").strip()
+            artists = str(artists or "").strip()
+            negative = str(negative or "").strip()
+            if not name or not artists:
+                return
+            if name in seen:
+                for item in parsed:
+                    if item["name"] == name:
+                        item["artists"] = artists
+                        if negative:
+                            item["negative"] = negative
+                        break
+                return
+            seen.add(name)
+            parsed.append({"name": name, "artists": artists, "negative": negative})
+
+        # 1. 如果传的是 dict
+        if isinstance(data, dict):
+            # 模式 1.1：包含 presets 键（Rainnya 格式或类似打包结构）
+            if isinstance(data.get("presets"), list):
+                source_name = "Rainnya 画师预设分享包"
+                for item in data["presets"]:
+                    if isinstance(item, dict):
+                        _add_preset(item.get("name"), item.get("artists") or item.get("prompt"), item.get("negative") or item.get("negative_prompt"))
+            # 模式 1.2：AstrBot 幻笔完整 config.json（包含 model / model_nai3 / model_nai4 等 section）
+            elif any(k in data for k in ("model", "model_nai3", "model_nai4", "model_nai4_5")):
+                source_name = "AstrBot 幻笔完整配置文件 (config.json)"
+                for sec in ("model", "model_nai3", "model_nai4", "model_nai4_5"):
+                    sec_obj = data.get(sec)
+                    if isinstance(sec_obj, dict) and isinstance(sec_obj.get("artist_presets"), list):
+                        for item in sec_obj["artist_presets"]:
+                            if isinstance(item, dict):
+                                _add_preset(item.get("name"), item.get("prompt") or item.get("artists"), item.get("negative_prompt") or item.get("negative"))
+            # 模式 1.3：包含 artist_presets 键的单节字典
+            elif isinstance(data.get("artist_presets"), list):
+                source_name = "AstrBot 幻笔画师预设列表"
+                for item in data["artist_presets"]:
+                    if isinstance(item, dict):
+                        _add_preset(item.get("name"), item.get("prompt") or item.get("artists"), item.get("negative_prompt") or item.get("negative"))
+            # 模式 1.4：云崽老幻笔 Key-Value 格式（{"古风": "artist:xxx, 1girl...", "水彩": "artist:yyy..."}）
+            elif all(isinstance(v, (str, dict)) for v in data.values()):
+                source_name = "云崽 / 幻笔 Key-Value 字典格式"
+                for k, v in data.items():
+                    if isinstance(v, str):
+                        _add_preset(k, v, "")
+                    elif isinstance(v, dict):
+                        _add_preset(k, v.get("prompt") or v.get("artists") or str(v), v.get("negative") or v.get("negative_prompt") or "")
+
+        # 2. 如果传的是 list
+        elif isinstance(data, list):
+            source_name = "画师预设数组"
+            for idx, item in enumerate(data, 1):
+                if isinstance(item, dict):
+                    nm = item.get("name") or f"画师预设 {idx}"
+                    art = item.get("artists") or item.get("prompt") or ""
+                    neg = item.get("negative") or item.get("negative_prompt") or ""
+                    _add_preset(nm, art, neg)
+                elif isinstance(item, str):
+                    _add_preset(f"画师预设 {idx}", item, "")
+
+        if not parsed:
+            raise ValueError("无法从提供的内容中解析出有效画师预设，请检查格式")
+        return parsed, source_name
+
+    async def _web_artist_presets_import(self):
+        """POST {base}/artist-presets/import：智能导入画师预设（多模自适应解析）。body {data:Any, mode:'merge'|'overwrite'}。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            raw_data = payload.get("data")
+            if raw_data is None:
+                return error_response("缺少导入数据 (data 字段)")
+            # 支持传入 JSON 字符串时内部自动 json.loads
+            if isinstance(raw_data, str):
+                try:
+                    raw_data = json.loads(raw_data)
+                except Exception as je:
+                    return error_response(f"传入的文本非合法 JSON: {je}")
+            mode = str(payload.get("mode", "merge") or "merge").strip().lower()
+            try:
+                new_presets, source_name = self._parse_imported_artist_presets(raw_data)
+            except ValueError as ve:
+                return error_response(str(ve))
+
+            if mode == "overwrite":
+                self.artist_presets = new_presets
+            else:
+                # merge 模式：已有同名更新，无则追加保序
+                existing_map = {p["name"]: p for p in self.artist_presets}
+                for np in new_presets:
+                    if np["name"] in existing_map:
+                        existing_map[np["name"]]["artists"] = np["artists"]
+                        if np["negative"]:
+                            existing_map[np["name"]]["negative"] = np["negative"]
+                    else:
+                        self.artist_presets.append(np)
+                        existing_map[np["name"]] = np
+
+            await self._save_artist_presets()
+            await self._load_artist_presets()
+            return json_response({
+                "ok": True,
+                "imported_count": len(new_presets),
+                "total_count": len(self.artist_presets),
+                "source_type": source_name,
+                "mode": mode,
+            })
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_artist_presets_detect_nai_brush(self):
+        """GET {base}/artist-presets/detect-nai-brush：探测本地已安装的 AstrBot 幻笔插件配置。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            # 候选检测路径
+            candidates = [
+                self.plugin_data_dir.parent / "astrbot_plugin_nai_brush",
+                self.plugin_data_dir.parent.parent / "plugins" / "astrbot_plugin_nai_brush",
+                self.plugin_data_dir.parent.parent / "data" / "plugins" / "astrbot_plugin_nai_brush",
+                Path("/home/miaomiao/Project/astrbot/data/plugins/astrbot_plugin_nai_brush"),
+                Path("/home/miaomiao/Project/astrbot/data/plugin_data/astrbot_plugin_nai_brush"),
+                Path("/tmp/astrbot_plugin_nai_brush"),
+            ]
+            found_info = None
+            for p in candidates:
+                if not p.exists():
+                    continue
+                # 检查 config.json
+                for fn in ("config.json", "_conf_schema.json"):
+                    cfg_file = p / fn
+                    if cfg_file.is_file():
+                        try:
+                            content = cfg_file.read_text(encoding="utf-8")
+                            data = json.loads(content)
+                            new_presets, src = self._parse_imported_artist_presets(data)
+                            if new_presets:
+                                found_info = {
+                                    "found": True,
+                                    "path": str(cfg_file),
+                                    "count": len(new_presets),
+                                    "source_type": src,
+                                    "presets": new_presets,
+                                }
+                                break
+                        except Exception:
+                            continue
+                if found_info:
+                    break
+
+            if found_info:
+                return json_response(found_info)
+            return json_response({"found": False})
         except Exception as e:
             return error_response(str(e))
 
@@ -4656,21 +5110,48 @@ class FigurineProPlugin(Star):
             if "blacklist" in payload and "user_blacklist" not in payload:
                 payload["user_blacklist"] = payload.pop("blacklist")
             saved = []
+            field_labels = {
+                "prefix": "要求指令带前缀", "extra_prefix": "自定义前缀", "use_proxy": "使用代理",
+                "proxy_url": "代理地址", "download_timeout": "下载超时", "download_retries": "下载重试次数",
+                "api_timeout": "API 超时", "openai_size": "OpenAI 默认分辨率", "openai_temperature": "OpenAI 温度",
+                "openai_max_tokens": "OpenAI Max Tokens", "safety_level": "Gemini 安全过滤等级",
+                "image_size": "Gemini 全局默认分辨率", "hires_whitelist": "高分辨率白名单",
+                "novalai_size": "NovelAI 默认分辨率", "novalai_sampler": "NovelAI 采样器",
+                "novalai_steps": "NovelAI 采样步数", "novalai_scale": "NovelAI 引导强度 scale",
+                "novalai_negative_prompt": "NovelAI 负面提示词", "novai_precheck_enabled": "NovelAI 启用预检",
+                "novai_precheck_timeout": "NovelAI 预检超时", "novai_point_warn_threshold": "NovelAI 点数不足提醒阈值",
+                "auto_recall_enabled": "启用自动撤回", "auto_recall_delay": "自动撤回延迟",
+                "auto_recall_allowed_groups": "自动撤回生效群", "nsfw_filter_enabled": "启用 NSFW 过滤",
+                "nsfw_filter_tags": "NSFW 标签", "nsfw_zip_enabled": "启用 NSFW 加密 ZIP 发送",
+                "tagger_provider_id": "打标提供商 ID", "tagger_temperature": "打标温度",
+                "tagger_max_tokens": "打标 Max Tokens", "artist_recommend_enabled": "启用画师推荐",
+                "artist_recommend_max_candidates": "画师推荐最大候选数", "artist_recommend_min_match": "最少匹配标签数",
+                "danbooru_enabled": "启用 Danbooru 动态搜索", "danbooru_base_url": "Danbooru API 地址",
+                "danbooru_limit": "Danbooru 候选数", "danbooru_min_posts": "Danbooru 最少帖子数",
+                "selfie_prompt": "自拍人物外貌特征", "user_whitelist": "用户白名单", "user_blacklist": "用户黑名单",
+                "group_whitelist": "群白名单", "group_blacklist": "群黑名单", "enable_user_limit": "启用用户次数限制",
+                "enable_group_limit": "启用群组次数限制", "user_count_cap": "用户持有次数上限",
+                "group_task_limit": "群并发生成任务数", "enable_checkin": "开启每日签到",
+                "checkin_fixed_reward": "签到固定奖励次数", "enable_random_checkin": "启用随机奖励",
+                "checkin_random_reward_min": "随机奖励下限", "checkin_random_reward_max": "随机奖励上限",
+                "help_menu": "帮助菜单", "prompt_list": "预设 prompt"
+            }
             # AstrBotConfig(dict) 无 set 方法：先收集更新项，最后一次性原子落盘（避免多次写盘）
             config_updates: Dict[str, Any] = {}
             for key, expected in self._WEB_CONFIG_FIELD_TYPES.items():
                 if key not in payload:
                     continue
                 value = payload[key]
+                label = field_labels.get(key, key)
                 if expected is bool:
                     if not isinstance(value, bool):
-                        return error_response(f"字段 {key} 必须为布尔值")
+                        return error_response(f"{label}：必须为布尔值 (true/false)")
                 elif expected is float:
                     # float 字段：openai_temperature(0-2) / novalai_scale(0-10)，越界夹取（同 _coerce clamp 语义）
                     try:
                         value = float(value)
                     except (TypeError, ValueError):
-                        return error_response(f"字段 {key} 必须为数字")
+                        return error_response(f"{label}：请输入有效数字")
                     if key == "openai_temperature":
                         value = max(0.0, min(value, 2.0))
                     elif key == "novalai_scale":
@@ -4679,10 +5160,10 @@ class FigurineProPlugin(Star):
                     try:
                         value = int(value)
                     except (TypeError, ValueError):
-                        return error_response(f"字段 {key} 必须为整数")
+                        return error_response(f"{label}：请输入有效整数")
                     # 非负校验：全部 int 字段均不允许负数（含超时/重试/签到奖励/上限等）
                     if value < 0:
-                        return error_response(f"字段 {key} 必须 >= 0")
+                        return error_response(f"{label}：数值不能小于 0")
                     # 渠道字段范围夹取
                     if key == "openai_max_tokens":
                         value = max(64, min(value, 16384))
@@ -4690,21 +5171,21 @@ class FigurineProPlugin(Star):
                         value = max(1, min(value, 50))
                 elif expected is list:
                     if not isinstance(value, list):
-                        return error_response(f"字段 {key} 必须为数组")
+                        return error_response(f"{label}：格式必须为列表")
                     if key == "prompt_list":
                         # 预设列表：前端按换行切分会把跨行提示词切成多个数组元素（无冒号碎片）
                         # → 后端先容错重组（无冒号元素并入前一个含冒号元素），重组后仍无冒号才报错
                         value = _rejoin_prompt_list(value)
                         for item in value:
                             if not isinstance(item, str) or ":" not in item:
-                                return error_response("prompt_list 元素格式应为 触发词:提示词（含换行的提示词会被自动合并）")
+                                return error_response("预设 prompt 格式错误：每条格式必须为「触发词:提示词」")
                     value = [str(v) for v in value]
                 elif expected is str:
                     if not isinstance(value, str):
-                        return error_response(f"字段 {key} 必须为字符串")
+                        return error_response(f"{label}：必须为文本内容")
                     # 渠道 size 字段：openai 仅 1K/2K/4K；novalai 接受新档位键 + 旧值，非法回退默认
                     if key == "openai_size" and value.strip() not in ("", "1K", "2K", "4K"):
-                        return error_response(f"字段 {key} 只能为 1K/2K/4K 或空")
+                        return error_response("OpenAI 默认分辨率：只能选择 1K、2K、4K 或不设置")
                     elif key == "novalai_size":
                         v = value.strip()
                         if v and v not in NOVALAI_SIZE_DIMENSIONS:
@@ -4744,11 +5225,102 @@ class FigurineProPlugin(Star):
         except Exception as e:
             return error_response(str(e))
 
+    async def _web_workbench_models(self):
+        """GET {base}/workbench/models：返回供测试台使用的所有模型与所属提供商上下文信息。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            items = []
+            for m in self.available_models:
+                p = self._find_usable_provider_for_model(m["name"]) or self._find_provider_for_model(m["name"])
+                items.append({
+                    "name": m["name"],
+                    "quota": m.get("quota", 1),
+                    "desc": m.get("desc", ""),
+                    "params": m.get("params") or {},
+                    "allowed_sizes": m.get("allowed_sizes"),
+                    "provider_id": m.get("provider_id", ""),
+                    "provider_name": p.get("name", "") if p else "",
+                    "provider_type": p.get("type", "openai") if p else "openai",
+                })
+            return json_response({"models": items})
+        except Exception as e:
+            return error_response(str(e))
+
+    async def _web_workbench_generate(self):
+        """POST {base}/workbench/generate：测试台出图接口（支持多提供商特殊参数与参考图，自动存盘日志）。"""
+        if (resp := self._web_require_login()):
+            return resp
+        try:
+            payload = await request.json(default={})
+            if not isinstance(payload, dict):
+                return error_response("请求体必须是 JSON 对象")
+            prompt = str(payload.get("prompt", "") or "").strip()
+            if not prompt:
+                return error_response("提示词 (prompt) 不能为空")
+
+            model_name = str(payload.get("model", "") or "").strip()
+            image_size = str(payload.get("image_size", "") or "").strip() or None
+            negative_prompt = str(payload.get("negative_prompt", "") or "").strip()
+            custom_params = payload.get("params")
+            gen_params = dict(custom_params) if isinstance(custom_params, dict) else {}
+
+            if negative_prompt:
+                gen_params["negative_prompt"] = negative_prompt
+            if image_size:
+                gen_params["size"] = image_size
+
+            # 参考图（图生图测试）
+            image_bytes_list: List[bytes] = []
+            ref_b64 = payload.get("reference_image")
+            if ref_b64 and isinstance(ref_b64, str):
+                if ref_b64.startswith("data:"):
+                    ref_b64 = ref_b64.split(",", 1)[1]
+                try:
+                    image_bytes_list.append(base64.b64decode(ref_b64))
+                except Exception as e:
+                    return error_response(f"参考图片 Base64 解码失败: {e}")
+
+            start_time = datetime.now()
+            res, used_model = await self._call_api(
+                image_bytes_list, prompt,
+                image_size=image_size,
+                group_id=None,
+                model_override=model_name or None,
+                gen_params=gen_params,
+                size_strict=False
+            )
+            elapsed = (datetime.now() - start_time).total_seconds()
+
+            if isinstance(res, bytes):
+                # 自动存盘并追加到日志时间线
+                try:
+                    await self._save_generation("webui", "admin", prompt, used_model, res)
+                except Exception as e:
+                    logger.warning(f"[NewImage/Workbench] 测试台生图存盘失败: {e}")
+
+                img_b64 = f"data:image/png;base64,{base64.b64encode(res).decode('utf-8')}"
+                return json_response({
+                    "ok": True,
+                    "model": used_model,
+                    "elapsed": round(elapsed, 2),
+                    "image_base64": img_b64,
+                    "size_bytes": len(res),
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+            else:
+                return error_response(f"生图失败 ({round(elapsed, 2)}s)：{res}")
+        except Exception as e:
+            return error_response(str(e))
+
     async def terminate(self):
-        # 回收在途后台生图任务（防止插件卸载时任务悬挂）；未完成的任务被 gather 等待/吞异常
+        # 回收在途后台任务（防止插件卸载时任务悬挂）；优先 cancel 未完成的任务，再 gather，避免休眠任务阻断热重载
         if self._bg_tasks:
             pending = list(self._bg_tasks)
             self._bg_tasks.clear()
+            for t in pending:
+                if not t.done():
+                    t.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
         if self.iwf:
             await self.iwf.terminate()

@@ -26,6 +26,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
           <span>提供商管理</span>
         </button>
+        <button type="button" class="nav-item" data-nav="workbench">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+          <span>生图测试台</span>
+        </button>
         <button type="button" class="nav-item" data-nav="counts">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
           <span>次数管理</span>
@@ -36,7 +40,7 @@
         </button>
         <button type="button" class="nav-item" data-nav="artists">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><circle cx="11" cy="11" r="2"/></svg>
-          <span>画师预设</span>
+          <span>预设</span>
         </button>
         <button type="button" class="nav-item" data-nav="settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -102,6 +106,10 @@
             <span class="type-badge" id="pdTypeBadge">Gemini</span>
             <h3 class="card-title" id="pdTitle">提供商详情</h3>
             <span class="appbar-spacer"></span>
+            <button type="button" class="btn btn-accent btn-sm" id="btnProviderSaveAll">
+              <svg viewBox="0 0 24 24" aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              <span>保存全部</span>
+            </button>
             <button type="button" class="btn btn-danger btn-sm" id="btnDeleteProvider">删除提供商</button>
           </div>
 
@@ -177,6 +185,225 @@
             </div>
           </div>
         </div>
+        </section>
+
+        <!-- ============ 页面：生图测试台 ============ -->
+        <section class="page" data-page="workbench" id="page-workbench" hidden aria-label="生图测试台">
+          <div class="workbench-layout">
+            <!-- 左栏：控制与参数输入 -->
+            <div class="workbench-left">
+              <!-- 模型与正反向提示词 -->
+              <div class="card">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">提示词与模型</h3>
+                    <p class="card-desc">配置要测试的模型、提示词与画师预设。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field">
+                    <span class="field-label">选择生图模型 <span class="badge neutral" id="wbProviderBadge" style="margin-left:6px;">默认提供商</span></span>
+                    <select id="wbModel" class="input"></select>
+                  </label>
+
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;margin-bottom:4px;">
+                    <span class="field-label" style="margin:0;">正向提示词 (Prompt)</span>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <span style="font-size:12px;color:var(--text-3rd);">快捷插入预设:</span>
+                      <select id="wbPresetSelect" class="cell-input mini" style="max-width:140px;">
+                        <option value="">选择画师预设…</option>
+                      </select>
+                    </div>
+                  </div>
+                  <textarea id="wbPrompt" class="input textarea" rows="4" placeholder="输入要生成的画面描述，例如：1girl, sakura tree, ethereal lighting, masterpiece..."></textarea>
+
+                  <label class="field" style="margin-top:10px;">
+                    <span class="field-label">负向提示词 (Negative Prompt)</span>
+                    <textarea id="wbNegative" class="input textarea" rows="2" placeholder="不希望出现的特征，例如：lowres, bad hands, blurry, worst quality..."></textarea>
+                  </label>
+
+                  <!-- 图生图参考图上传 -->
+                  <div style="margin-top:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                      <span class="field-label" style="margin:0;">参考图（可选，用于图生图测试）</span>
+                      <button type="button" class="btn btn-ghost btn-sm" id="btnWbClearRef" hidden style="padding:2px 8px;font-size:11px;">清除图片</button>
+                    </div>
+                    <input type="file" id="wbRefFileInput" accept="image/*" style="display:none">
+                    <div class="wb-ref-dropzone" id="wbRefDropzone" style="border:1px dashed var(--border);border-radius:var(--radius-md);padding:10px;text-align:center;cursor:pointer;background:var(--bg-card-sub);transition:var(--trans);">
+                      <div id="wbRefEmptyView">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" style="width:20px;height:20px;color:var(--text-3rd);margin-bottom:4px;"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        <div style="font-size:12px;color:var(--text-2nd);">点击或拖拽上传参考图片</div>
+                      </div>
+                      <div id="wbRefPreviewView" hidden style="display:flex;align-items:center;gap:10px;text-align:left;">
+                        <img id="wbRefImg" style="width:50px;height:50px;object-fit:cover;border-radius:var(--radius-sm);border:1px solid var(--border);">
+                        <div>
+                          <div id="wbRefFileName" style="font-size:12px;font-weight:600;color:var(--text-main);">image.png</div>
+                          <div id="wbRefFileSize" style="font-size:11px;color:var(--text-3rd);">-- KB</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 特殊提供商专属参数设定 -->
+              <div class="card" id="wbParamsCard">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">生成参数微调</h3>
+                    <p class="card-desc" id="wbParamsDesc">根据所选提供商类型自适应呈现专属参数设定。</p>
+                  </div>
+                </div>
+
+                <!-- 1. NovelAI 专属参数 -->
+                <div id="wbNaiSection" hidden>
+                  <div class="form form-grid">
+                    <label class="field">
+                      <span class="field-label">分辨率档位</span>
+                      <select id="wbNaiSize" class="input">
+                        <option value="portrait_medium">竖·中 832×1216（推荐）</option>
+                        <option value="portrait_small">竖·小 640×1536</option>
+                        <option value="portrait_large">竖·大 1024×1536</option>
+                        <option value="landscape_medium">横·中 1216×832</option>
+                        <option value="landscape_small">横·小 1536×640</option>
+                        <option value="landscape_large">横·大 1536×1024</option>
+                        <option value="square">方图 1024×1024</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">采样器 (Sampler)</span>
+                      <select id="wbNaiSampler" class="input">
+                        <option value="k_euler_ancestral">k_euler_ancestral（默认推荐）</option>
+                        <option value="k_dpmpp_2s_ancestral">k_dpmpp_2s_ancestral</option>
+                        <option value="k_euler">k_euler</option>
+                        <option value="k_dpmpp_2m">k_dpmpp_2m</option>
+                        <option value="k_dpmpp_sde">k_dpmpp_sde</option>
+                        <option value="ddim">ddim</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="form form-grid" style="margin-top:10px;">
+                    <label class="field">
+                      <span class="field-label">采样步数 (Steps): <b id="wbNaiStepsVal">23</b></span>
+                      <input type="range" id="wbNaiSteps" class="slider" min="1" max="50" value="23">
+                    </label>
+                    <label class="field">
+                      <span class="field-label">引导强度 (Scale / CFG): <b id="wbNaiScaleVal">6.0</b></span>
+                      <input type="range" id="wbNaiScale" class="slider" min="0" max="10" step="0.1" value="6.0">
+                    </label>
+                  </div>
+                  <div class="form form-grid" style="margin-top:10px;">
+                    <label class="field">
+                      <span class="field-label">随机种子 Seed <i class="field-hint">（留空则每次随机）</i></span>
+                      <input type="number" id="wbNaiSeed" class="input" placeholder="留空为随机">
+                    </label>
+                  </div>
+                </div>
+
+                <!-- 2. Gemini 专属参数 -->
+                <div id="wbGeminiSection" hidden>
+                  <div class="form form-grid">
+                    <label class="field">
+                      <span class="field-label">画质分辨率</span>
+                      <select id="wbGeminiSize" class="input">
+                        <option value="1K">1K (标准 1024)</option>
+                        <option value="2K">2K (高清 2048)</option>
+                        <option value="4K">4K (超清 4096)</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">安全过滤等级</span>
+                      <select id="wbGeminiSafety" class="input">
+                        <option value="">默认配置</option>
+                        <option value="BLOCK_NONE">BLOCK_NONE (完全放行)</option>
+                        <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH (仅拦截极高危)</option>
+                        <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE (标准)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label class="field" style="margin-top:10px;">
+                    <span class="field-label">采样温度 (Temperature): <b id="wbGeminiTempVal">0.9</b></span>
+                    <input type="range" id="wbGeminiTemp" class="slider" min="0" max="2" step="0.05" value="0.9">
+                  </label>
+                </div>
+
+                <!-- 3. OpenAI 兼容参数 -->
+                <div id="wbOpenaiSection" hidden>
+                  <div class="form form-grid">
+                    <label class="field">
+                      <span class="field-label">分辨率选项</span>
+                      <select id="wbOpenaiSize" class="input">
+                        <option value="">模型默认</option>
+                        <option value="1K">1K</option>
+                        <option value="2K">2K</option>
+                        <option value="4K">4K</option>
+                        <option value="1024x1024">1024x1024</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span class="field-label">Max Tokens</span>
+                      <input type="number" id="wbOpenaiMaxTokens" class="input" placeholder="留空使用默认">
+                    </label>
+                  </div>
+                  <label class="field" style="margin-top:10px;">
+                    <span class="field-label">Temperature: <b id="wbOpenaiTempVal">1.0</b></span>
+                    <input type="range" id="wbOpenaiTemp" class="slider" min="0" max="2" step="0.05" value="1.0">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 提交按钮区 -->
+              <div style="display:flex;gap:10px;align-items:center;">
+                <button type="button" class="btn btn-accent" id="btnWbGenerate" style="flex:1;height:42px;font-size:14px;font-weight:600;">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" style="width:16px;height:16px;vertical-align:-3px;margin-right:6px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  <span>立即生成图片</span>
+                </button>
+                <button type="button" class="btn btn-ghost" id="btnWbReset" style="height:42px;">重置</button>
+              </div>
+            </div>
+
+            <!-- 右栏：画布与实时预览 -->
+            <div class="workbench-right">
+              <div class="card" style="height:100%;min-height:560px;display:flex;flex-direction:column;">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">生成结果与画布</h3>
+                    <p class="card-desc" id="wbResultMeta">准备就绪，点击左侧「立即生成图片」开始创作。</p>
+                  </div>
+                  <div class="card-actions" id="wbResultActions" hidden>
+                    <button type="button" class="btn btn-ghost btn-sm" id="btnWbDownload">
+                      <svg viewBox="0 0 24 24" aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      <span>下载原图</span>
+                    </button>
+                    <button type="button" class="btn btn-ghost btn-sm" id="btnWbViewLarge">查看大图</button>
+                  </div>
+                </div>
+
+                <div class="workbench-canvas" id="wbCanvas">
+                  <!-- 1. 初始空状态 -->
+                  <div class="wb-empty" id="wbEmptyState">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:48px;height:48px;color:var(--text-3rd);margin-bottom:12px;"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    <div style="font-weight:600;font-size:15px;color:var(--text-main);margin-bottom:6px;">生图测试台已就绪</div>
+                    <p style="font-size:13px;color:var(--text-3rd);max-width:320px;line-height:1.5;">在左侧输入提示词，针对所选提供商调节专有生成参数，点击生成即可在此处即时出图并自动落盘记录。</p>
+                  </div>
+
+                  <!-- 2. 生成中加载状态 -->
+                  <div class="wb-loading" id="wbLoadingState" hidden>
+                    <div class="caret" style="width:36px;height:36px;border-width:3px;margin:0 auto 16px;"></div>
+                    <div style="font-weight:600;font-size:15px;color:var(--text-main);" id="wbLoadingTitle">正在向 API 发送生图请求…</div>
+                    <div style="font-size:13px;color:var(--accent);margin-top:6px;font-family:var(--font-mono);" id="wbLoadingTimer">耗时：0.0s</div>
+                  </div>
+
+                  <!-- 3. 出图展示 -->
+                  <div class="wb-result-view" id="wbResultView" hidden>
+                    <div class="wb-img-container">
+                      <img id="wbResultImg" alt="生图测试结果">
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- ============ 页面：次数管理 ============ -->
@@ -262,473 +489,554 @@
         </section>
 
         <!-- ============ 页面：基础设置 ============ -->
-        <section class="page" data-page="settings" id="page-settings" hidden aria-label="基础设置">
-          <div class="settings-grid">
-
-            <!-- OpenAI 参数 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">OpenAI 参数</h3>
-                  <p class="card-desc">OpenAI 兼容渠道的默认生图参数。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field">
-                  <span class="field-label">默认分辨率</span>
-                  <select id="cfgOpenaiSize" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="1K">1K</option>
-                    <option value="2K">2K</option>
-                    <option value="4K">4K</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">温度（0-2，步进0.1）</span>
-                  <input type="number" id="cfgOpenaiTemp" class="input" min="0" max="2" step="0.1">
-                </label>
-                <label class="field">
-                  <span class="field-label">Max Tokens</span>
-                  <input type="number" id="cfgOpenaiMaxTokens" class="input" min="1">
-                </label>
-              </div>
+        <section class="page" data-page="settings" id="page-settings" hidden aria-label="设置">
+          <!-- 顶部分栏 Tab -->
+          <div class="card tab-header-card">
+            <div class="sub-tabs-bar" role="tablist" aria-label="设置分栏">
+              <button type="button" class="sub-tab-btn is-active" data-cfgtab="tab-params" role="tab" aria-selected="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+                <span>参数设定</span>
+              </button>
+              <button type="button" class="sub-tab-btn" data-cfgtab="tab-defense" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span>绘图防护</span>
+              </button>
+              <button type="button" class="sub-tab-btn" data-cfgtab="tab-enhancement" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                <span>增强模块</span>
+              </button>
+              <button type="button" class="sub-tab-btn" data-cfgtab="tab-base" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span>基础设定</span>
+              </button>
             </div>
-
-            <!-- Gemini -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">Gemini 参数</h3>
-                  <p class="card-desc">安全过滤等级、默认分辨率与高分辨率白名单。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">安全过滤等级</span>
-                  <select id="cfgSafety" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="BLOCK_NONE">BLOCK_NONE 不过滤</option>
-                    <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH 仅过滤高危</option>
-                    <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE</option>
-                    <option value="BLOCK_LOW_AND_ABOVE">BLOCK_LOW_AND_ABOVE</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">全局默认分辨率</span>
-                  <select id="cfgImageSize" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="1K">1K</option>
-                    <option value="2K">2K</option>
-                    <option value="4K">4K</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">高分辨率白名单（每行一个 QQ）</span>
-                  <textarea id="cfgHires" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
-                </label>
-              </div>
-            </div>
-
-            <!-- NovalAI 参数 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">NovalAI 参数</h3>
-                  <p class="card-desc">NovelAI 渠道的默认生图参数。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field">
-                  <span class="field-label">默认分辨率</span>
-                  <select id="cfgNovalaiSize" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="portrait_small">竖·小 640×1536</option>
-                    <option value="portrait_medium">竖·中 832×1216</option>
-                    <option value="portrait_large">竖·大 1024×1536</option>
-                    <option value="landscape_small">横·小 1536×640</option>
-                    <option value="landscape_medium">横·中 1216×832</option>
-                    <option value="landscape_large">横·大 1536×1024</option>
-                    <option value="square">方图 1024×1024</option>
-                    <option value="1K">1K（旧）</option>
-                    <option value="2K">2K（旧）</option>
-                    <option value="4K">4K（旧）</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">采样器</span>
-                  <select id="cfgNovalaiSampler" class="input">
-                    <option value="">（不设置）</option>
-                    <option value="k_euler_ancestral">k_euler_ancestral</option>
-                    <option value="k_dpmpp_2s_ancestral">k_dpmpp_2s_ancestral</option>
-                    <option value="k_dpmpp_2m_sde">k_dpmpp_2m_sde</option>
-                    <option value="k_euler">k_euler</option>
-                    <option value="k_dpmpp_2m">k_dpmpp_2m</option>
-                    <option value="k_dpmpp_sde">k_dpmpp_sde</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">采样步数（1-50）</span>
-                  <input type="number" id="cfgNovalaiSteps" class="input" min="1" max="50">
-                </label>
-                <label class="field">
-                  <span class="field-label">引导强度 scale（0-10，步进0.1）</span>
-                  <input type="number" id="cfgNovalaiScale" class="input" min="0" max="10" step="0.1">
-                </label>
-                <label class="field">
-                  <span class="field-label">负面提示词（每行一个）</span>
-                  <textarea id="cfgNovalaiNeg" class="input" rows="3" placeholder="负面词，每行一个"></textarea>
-                </label>
-              </div>
-            </div>
-
-            <!-- NovelAI 预检 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">NovelAI 预检</h3>
-                  <p class="card-desc">生图前对 NovelAI key 做预检：余额/可用性检查与超时控制。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">启用预检</span>
-                  <input type="checkbox" id="cfgNovaiPrecheck" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">预检超时（秒）</span>
-                  <input type="number" id="cfgNovaiPrecheckTimeout" class="input" min="1">
-                </label>
-                <label class="field">
-                  <span class="field-label">点数不足提醒阈值</span>
-                  <input type="number" id="cfgNovaiWarn" class="input" min="0">
-                </label>
-              </div>
-            </div>
-
-            <!-- 自动撤回 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">自动撤回</h3>
-                  <p class="card-desc">生成完成后自动撤回结果消息，指定群白名单生效。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">启用自动撤回</span>
-                  <input type="checkbox" id="cfgAutoRecall" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">撤回延迟（秒）</span>
-                  <input type="number" id="cfgAutoRecallDelay" class="input" min="0">
-                </label>
-                <label class="field" style="grid-column: 1 / -1;">
-                  <span class="field-label">生效群（每行一个 platform:chat_id）</span>
-                  <textarea id="cfgAutoRecallGroups" class="input" rows="3" placeholder="aiocqhttp:123456789"></textarea>
-                </label>
-              </div>
-            </div>
-
-            <!-- NSFW 过滤 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">NSFW 过滤</h3>
-                  <p class="card-desc">检测到 NSFW 内容时的标签注入设置。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field field-row">
-                  <span class="field-label">启用 NSFW 过滤</span>
-                  <input type="checkbox" id="cfgNsfwFilter" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">NSFW 标签</span>
-                  <input type="text" id="cfgNsfwTags" class="input" placeholder="{{{{{nsfw}}}}}">
-                </label>
-                <label class="field field-row">
-                  <span class="field-label">启用 NSFW 加密 ZIP 发送<i class="field-hint">关闭后即使 LLM 传 nsfw=true 也直接发原图；可按群用指令「发图加密 开|关」覆盖</i></span>
-                  <input type="checkbox" id="cfgNsfwZipEnabled" class="switch">
-                </label>
-              </div>
-            </div>
-
-            <!-- 打标 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">打标</h3>
-                  <p class="card-desc">图片反推标签使用的打标模型与参数。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field">
-                  <span class="field-label">打标提供商 ID</span>
-                  <input type="text" id="cfgTaggerProvider" class="input" placeholder="模型/提供商 ID">
-                </label>
-                <label class="field">
-                  <span class="field-label">温度（0-2，步进0.1）</span>
-                  <input type="number" id="cfgTaggerTemp" class="input" min="0" max="2" step="0.1">
-                </label>
-                <label class="field">
-                  <span class="field-label">Max Tokens</span>
-                  <input type="number" id="cfgTaggerMaxTokens" class="input" min="1">
-                </label>
-              </div>
-            </div>
-
-            <!-- 画师推荐 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">画师推荐</h3>
-                  <p class="card-desc">根据标签自动推荐画师串的候选数量与匹配阈值。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">启用画师推荐</span>
-                  <input type="checkbox" id="cfgArtistRecEnabled" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">最大候选数</span>
-                  <input type="number" id="cfgArtistRecMax" class="input" min="1">
-                </label>
-                <label class="field">
-                  <span class="field-label">最少匹配标签数</span>
-                  <input type="number" id="cfgArtistRecMin" class="input" min="1">
-                </label>
-              </div>
-            </div>
-
-            <!-- 自拍特征 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">自拍特征</h3>
-                  <p class="card-desc">LLM 绘图工具传 selfie=true 时自动追加的人物外貌特征。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">自拍人物外貌特征（英文）<i class="field-hint">LLM 绘图工具传 selfie=true 时自动追加这段外貌描述，如：a cute catgirl with soft silver hair and blue eyes, gentle smile</i></span>
-                  <textarea id="cfgSelfiePrompt" class="input" rows="3" placeholder="a cute catgirl with soft silver hair and blue eyes, gentle smile"></textarea>
-                </label>
-              </div>
-            </div>
-
-            <!-- 基础 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">基础</h3>
-                  <p class="card-desc">指令前缀、网络代理与请求超时等基础配置。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">要求指令带前缀</span>
-                  <input type="checkbox" id="cfgPrefix" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">自定义前缀</span>
-                  <input type="text" id="cfgExtraPrefix" class="input" placeholder="例如 bnn">
-                </label>
-                <label class="field field-row">
-                  <span class="field-label">使用代理</span>
-                  <input type="checkbox" id="cfgUseProxy" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">代理地址</span>
-                  <input type="text" id="cfgProxyUrl" class="input" placeholder="http://127.0.0.1:7890">
-                </label>
-                <label class="field">
-                  <span class="field-label">下载超时（秒）</span>
-                  <input type="number" id="cfgDownloadTimeout" class="input" min="1">
-                </label>
-                <label class="field">
-                  <span class="field-label">下载重试次数</span>
-                  <input type="number" id="cfgDownloadRetries" class="input" min="0">
-                </label>
-                <label class="field">
-                  <span class="field-label">API 超时（秒）</span>
-                  <input type="number" id="cfgApiTimeout" class="input" min="1">
-                </label>
-              </div>
-            </div>
-
-            <!-- 次数限制 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">次数限制</h3>
-                  <p class="card-desc">用户 / 群组生图次数限制与并发队列。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">启用用户次数限制</span>
-                  <input type="checkbox" id="cfgEnableUser" class="switch">
-                </label>
-                <label class="field field-row">
-                  <span class="field-label">启用群组次数限制</span>
-                  <input type="checkbox" id="cfgEnableGroup" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">用户持有次数上限（0=不限）</span>
-                  <input type="number" id="cfgUserCap" class="input" min="0">
-                </label>
-                <label class="field">
-                  <span class="field-label">群并发生成任务数（0=不限）</span>
-                  <input type="number" id="cfgTaskLimit" class="input" min="0">
-                </label>
-              </div>
-            </div>
-
-            <!-- 签到系统 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">签到系统</h3>
-                  <p class="card-desc">每日签到与随机奖励次数。</p>
-                </div>
-              </div>
-              <div class="form form-grid">
-                <label class="field field-row">
-                  <span class="field-label">开启每日签到（辉宝赐福）</span>
-                  <input type="checkbox" id="cfgEnableCheckin" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">固定奖励次数</span>
-                  <input type="number" id="cfgCheckinFixed" class="input" min="0">
-                </label>
-                <label class="field field-row">
-                  <span class="field-label">启用随机奖励</span>
-                  <input type="checkbox" id="cfgRandomCheckin" class="switch">
-                </label>
-                <label class="field">
-                  <span class="field-label">随机奖励下限（次数）</span>
-                  <input type="number" id="cfgCheckinMin" class="input" min="0">
-                </label>
-                <label class="field">
-                  <span class="field-label">随机奖励上限（次数）</span>
-                  <input type="number" id="cfgCheckinMax" class="input" min="0">
-                </label>
-              </div>
-            </div>
-
-            <!-- 权限 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">权限</h3>
-                  <p class="card-desc">用户 / 群组白名单与黑名单，空列表表示不限制。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">用户白名单（每行一个 QQ，空=全部）</span>
-                  <textarea id="cfgUserWhite" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
-                </label>
-                <label class="field">
-                  <span class="field-label">用户黑名单（每行一个 QQ）</span>
-                  <textarea id="cfgUserBlack" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
-                </label>
-                <label class="field">
-                  <span class="field-label">群白名单（每行一个群号，空=全部）</span>
-                  <textarea id="cfgGroupWhite" class="input" rows="3" placeholder="群号，每行一个"></textarea>
-                </label>
-                <label class="field">
-                  <span class="field-label">群黑名单（每行一个群号）</span>
-                  <textarea id="cfgGroupBlack" class="input" rows="3" placeholder="群号，每行一个"></textarea>
-                </label>
-              </div>
-            </div>
-
-            <!-- 帮助与预设 -->
-            <div class="card">
-              <div class="card-head">
-                <div>
-                  <h3 class="card-title">帮助与预设</h3>
-                  <p class="card-desc">自定义帮助菜单与生图预设 prompt（每行 触发词:提示词）。</p>
-                </div>
-              </div>
-              <div class="form">
-                <label class="field">
-                  <span class="field-label">帮助菜单（空=默认）</span>
-                  <textarea id="cfgHelpMenu" class="input" rows="4" placeholder="自定义帮助文本，留空使用默认"></textarea>
-                </label>
-                <label class="field">
-                  <span class="field-label">预设 prompt（每行 触发词:提示词）</span>
-                  <textarea id="cfgPromptList" class="input" rows="6" placeholder="手办化:Your task is to..."></textarea>
-                </label>
-              </div>
-            </div>
-
           </div>
+
+          <!-- 分栏 1：参数设定 (OpenAI / Gemini / NovelAI / NovelAI 预检) -->
+          <div class="cfg-tab-panel" id="panel-tab-params">
+            <div class="settings-grid">
+              <!-- OpenAI 参数 -->
+              <div class="card" id="card-openai">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">OpenAI 参数</h3>
+                    <p class="card-desc">OpenAI 兼容渠道的默认生图参数与 Token 限制。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field" data-field="openai_size">
+                    <span class="field-label">默认分辨率</span>
+                    <select id="cfgOpenaiSize" class="input">
+                      <option value="">（不设置）</option>
+                      <option value="1K">1K</option>
+                      <option value="2K">2K</option>
+                      <option value="4K">4K</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field="openai_temperature">
+                    <span class="field-label">温度（0-2，步进0.1）</span>
+                    <input type="number" id="cfgOpenaiTemp" class="input" min="0" max="2" step="0.1">
+                  </label>
+                  <label class="field" data-field="openai_max_tokens">
+                    <span class="field-label">Max Tokens</span>
+                    <input type="number" id="cfgOpenaiMaxTokens" class="input" min="64" max="16384">
+                  </label>
+                </div>
+              </div>
+
+              <!-- Gemini -->
+              <div class="card" id="card-gemini">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">Gemini 参数</h3>
+                    <p class="card-desc">安全过滤等级、全局默认分辨率与高分辨率权限白名单。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field" data-field="safety_level">
+                    <span class="field-label">安全过滤等级</span>
+                    <select id="cfgSafety" class="input">
+                      <option value="">（不设置）</option>
+                      <option value="BLOCK_NONE">BLOCK_NONE 不过滤</option>
+                      <option value="BLOCK_ONLY_HIGH">BLOCK_ONLY_HIGH 仅过滤高危</option>
+                      <option value="BLOCK_MEDIUM_AND_ABOVE">BLOCK_MEDIUM_AND_ABOVE</option>
+                      <option value="BLOCK_LOW_AND_ABOVE">BLOCK_LOW_AND_ABOVE</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field="image_size">
+                    <span class="field-label">全局默认分辨率</span>
+                    <select id="cfgImageSize" class="input">
+                      <option value="">（不设置）</option>
+                      <option value="1K">1K</option>
+                      <option value="2K">2K</option>
+                      <option value="4K">4K</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field="hires_whitelist">
+                    <span class="field-label">高分辨率白名单（每行一个 QQ）</span>
+                    <textarea id="cfgHires" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                  </label>
+                </div>
+              </div>
+
+              <!-- NovalAI 参数 -->
+              <div class="card" id="card-novalai">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">NovelAI 参数</h3>
+                    <p class="card-desc">NovelAI 渠道官方与反代协议下的生成参数。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field" data-field="novalai_size">
+                    <span class="field-label">默认分辨率</span>
+                    <select id="cfgNovalaiSize" class="input">
+                      <option value="">（不设置）</option>
+                      <option value="portrait_small">竖·小 640×1536</option>
+                      <option value="portrait_medium">竖·中 832×1216</option>
+                      <option value="portrait_large">竖·大 1024×1536</option>
+                      <option value="landscape_small">横·小 1536×640</option>
+                      <option value="landscape_medium">横·中 1216×832</option>
+                      <option value="landscape_large">横·大 1536×1024</option>
+                      <option value="square">方图 1024×1024</option>
+                      <option value="1K">1K（旧）</option>
+                      <option value="2K">2K（旧）</option>
+                      <option value="4K">4K（旧）</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field="novalai_sampler">
+                    <span class="field-label">采样器</span>
+                    <select id="cfgNovalaiSampler" class="input">
+                      <option value="">（不设置）</option>
+                      <option value="k_euler_ancestral">k_euler_ancestral</option>
+                      <option value="k_dpmpp_2s_ancestral">k_dpmpp_2s_ancestral</option>
+                      <option value="k_dpmpp_2m_sde">k_dpmpp_2m_sde</option>
+                      <option value="k_euler">k_euler</option>
+                      <option value="k_dpmpp_2m">k_dpmpp_2m</option>
+                      <option value="k_dpmpp_sde">k_dpmpp_sde</option>
+                    </select>
+                  </label>
+                  <label class="field" data-field="novalai_steps">
+                    <span class="field-label">采样步数（1-50）</span>
+                    <input type="number" id="cfgNovalaiSteps" class="input" min="1" max="50">
+                  </label>
+                  <label class="field" data-field="novalai_scale">
+                    <span class="field-label">引导强度 scale（0-10，步进0.1）</span>
+                    <input type="number" id="cfgNovalaiScale" class="input" min="0" max="10" step="0.1">
+                  </label>
+                  <label class="field" data-field="novalai_negative_prompt" style="grid-column: 1 / -1;">
+                    <span class="field-label">负面提示词（每行一个）</span>
+                    <textarea id="cfgNovalaiNeg" class="input" rows="3" placeholder="负面词，每行一个"></textarea>
+                  </label>
+                </div>
+              </div>
+
+              <!-- NovelAI 预检 -->
+              <div class="card" id="card-novai-precheck">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">NovelAI 预检</h3>
+                    <p class="card-desc">生图前预检 NovelAI Key 余额与可用性，防空跑或额度耗尽。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="novai_precheck_enabled">
+                    <span class="field-label">启用预检</span>
+                    <input type="checkbox" id="cfgNovaiPrecheck" class="switch">
+                  </label>
+                  <label class="field" data-field="novai_precheck_timeout">
+                    <span class="field-label">预检超时（秒）</span>
+                    <input type="number" id="cfgNovaiPrecheckTimeout" class="input" min="1">
+                  </label>
+                  <label class="field" data-field="novai_point_warn_threshold">
+                    <span class="field-label">点数不足提醒阈值</span>
+                    <input type="number" id="cfgNovaiWarn" class="input" min="0">
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 分栏 2：绘图防护 (自动撤回 / NSFW 过滤) -->
+          <div class="cfg-tab-panel" id="panel-tab-defense" hidden>
+            <div class="settings-grid">
+              <!-- 自动撤回 -->
+              <div class="card" id="card-autorecall">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">自动撤回</h3>
+                    <p class="card-desc">生成完成后自动撤回机器人发送的结果消息，按白名单群生效。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="auto_recall_enabled">
+                    <span class="field-label">启用自动撤回</span>
+                    <input type="checkbox" id="cfgAutoRecall" class="switch">
+                  </label>
+                  <label class="field" data-field="auto_recall_delay">
+                    <span class="field-label">撤回延迟（秒）</span>
+                    <input type="number" id="cfgAutoRecallDelay" class="input" min="0">
+                  </label>
+                  <label class="field" data-field="auto_recall_allowed_groups" style="grid-column: 1 / -1;">
+                    <span class="field-label">生效群（每行一个 platform:chat_id）</span>
+                    <textarea id="cfgAutoRecallGroups" class="input" rows="3" placeholder="aiocqhttp:123456789"></textarea>
+                  </label>
+                </div>
+              </div>
+
+              <!-- NSFW 过滤 -->
+              <div class="card" id="card-nsfw">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">NSFW 过滤与加密</h3>
+                    <p class="card-desc">检测到 NSFW 内容时的标签注入及密码加密 ZIP 发送配置。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field field-row" data-field="nsfw_filter_enabled">
+                    <span class="field-label">启用 NSFW 过滤</span>
+                    <input type="checkbox" id="cfgNsfwFilter" class="switch">
+                  </label>
+                  <label class="field" data-field="nsfw_filter_tags">
+                    <span class="field-label">NSFW 标签</span>
+                    <input type="text" id="cfgNsfwTags" class="input" placeholder="{{{{{nsfw}}}}}">
+                  </label>
+                  <label class="field field-row" data-field="nsfw_zip_enabled">
+                    <span class="field-label">启用 NSFW 加密 ZIP 发送<i class="field-hint">关闭后即使 LLM 传 nsfw=true 也直接发原图；可按群用指令「发图加密 开|关」覆盖</i></span>
+                    <input type="checkbox" id="cfgNsfwZipEnabled" class="switch">
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 分栏 3：增强模块 (打标 / 画师推荐 / 自拍特征) -->
+          <div class="cfg-tab-panel" id="panel-tab-enhancement" hidden>
+            <div class="settings-grid">
+              <!-- 打标 -->
+              <div class="card" id="card-tagger">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">打标（图片反推）</h3>
+                    <p class="card-desc">图片反推标签使用的专用 LLM 模型与生成参数。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field" data-field="tagger_provider_id">
+                    <span class="field-label">打标提供商 ID</span>
+                    <input type="text" id="cfgTaggerProvider" class="input" placeholder="模型/提供商 ID">
+                  </label>
+                  <label class="field" data-field="tagger_temperature">
+                    <span class="field-label">温度（0-2，步进0.1）</span>
+                    <input type="number" id="cfgTaggerTemp" class="input" min="0" max="2" step="0.1">
+                  </label>
+                  <label class="field" data-field="tagger_max_tokens">
+                    <span class="field-label">Max Tokens</span>
+                    <input type="number" id="cfgTaggerMaxTokens" class="input" min="1">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 画师推荐 -->
+              <div class="card" id="card-artist-rec">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">画师推荐</h3>
+                    <p class="card-desc">根据标签自动推荐画师串的候选数与最少匹配标签数。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="artist_recommend_enabled">
+                    <span class="field-label">启用画师推荐</span>
+                    <input type="checkbox" id="cfgArtistRecEnabled" class="switch">
+                  </label>
+                  <label class="field" data-field="artist_recommend_max_candidates">
+                    <span class="field-label">最大候选数</span>
+                    <input type="number" id="cfgArtistRecMax" class="input" min="1">
+                  </label>
+                  <label class="field" data-field="artist_recommend_min_match">
+                    <span class="field-label">最少匹配标签数</span>
+                    <input type="number" id="cfgArtistRecMin" class="input" min="1">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 自拍特征 -->
+              <div class="card" id="card-selfie">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">自拍特征描述</h3>
+                    <p class="card-desc">LLM 绘图工具传 selfie=true 时自动追加的人物外貌特征。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field" data-field="selfie_prompt">
+                    <span class="field-label">自拍人物外貌特征（英文）<i class="field-hint">LLM 绘图工具传 selfie=true 时自动追加，如：a cute catgirl with soft silver hair and blue eyes, gentle smile</i></span>
+                    <textarea id="cfgSelfiePrompt" class="input" rows="3" placeholder="a cute catgirl with soft silver hair and blue eyes, gentle smile"></textarea>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 分栏 4：基础设定 (基础 / 次数限制 / 签到系统 / 权限 / 帮助菜单) -->
+          <div class="cfg-tab-panel" id="panel-tab-base" hidden>
+            <div class="settings-grid">
+              <!-- 基础 -->
+              <div class="card" id="card-base-cfg">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">基础运行设置</h3>
+                    <p class="card-desc">指令前缀、网络代理与超时控制。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="prefix">
+                    <span class="field-label">要求指令带前缀</span>
+                    <input type="checkbox" id="cfgPrefix" class="switch">
+                  </label>
+                  <label class="field" data-field="extra_prefix">
+                    <span class="field-label">自定义前缀</span>
+                    <input type="text" id="cfgExtraPrefix" class="input" placeholder="例如 bnn">
+                  </label>
+                  <label class="field field-row" data-field="use_proxy">
+                    <span class="field-label">使用代理</span>
+                    <input type="checkbox" id="cfgUseProxy" class="switch">
+                  </label>
+                  <label class="field" data-field="proxy_url">
+                    <span class="field-label">代理地址</span>
+                    <input type="text" id="cfgProxyUrl" class="input" placeholder="http://127.0.0.1:7890">
+                  </label>
+                  <label class="field" data-field="download_timeout">
+                    <span class="field-label">下载超时（秒）</span>
+                    <input type="number" id="cfgDownloadTimeout" class="input" min="1">
+                  </label>
+                  <label class="field" data-field="download_retries">
+                    <span class="field-label">下载重试次数</span>
+                    <input type="number" id="cfgDownloadRetries" class="input" min="0">
+                  </label>
+                  <label class="field" data-field="api_timeout">
+                    <span class="field-label">API 超时（秒）</span>
+                    <input type="number" id="cfgApiTimeout" class="input" min="1">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 次数限制 -->
+              <div class="card" id="card-quota">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">次数限制与并发</h3>
+                    <p class="card-desc">用户 / 群组生图次数配额限制与单群并发控制。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="enable_user_limit">
+                    <span class="field-label">启用用户次数限制</span>
+                    <input type="checkbox" id="cfgEnableUser" class="switch">
+                  </label>
+                  <label class="field field-row" data-field="enable_group_limit">
+                    <span class="field-label">启用群组次数限制</span>
+                    <input type="checkbox" id="cfgEnableGroup" class="switch">
+                  </label>
+                  <label class="field" data-field="user_count_cap">
+                    <span class="field-label">用户持有次数上限（0=不限）</span>
+                    <input type="number" id="cfgUserCap" class="input" min="0">
+                  </label>
+                  <label class="field" data-field="group_task_limit">
+                    <span class="field-label">群并发生成任务数（0=不限）</span>
+                    <input type="number" id="cfgTaskLimit" class="input" min="0">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 签到系统 -->
+              <div class="card" id="card-checkin">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">签到系统</h3>
+                    <p class="card-desc">每日签到（喵喵赐福）奖励规则。</p>
+                  </div>
+                </div>
+                <div class="form form-grid">
+                  <label class="field field-row" data-field="enable_checkin">
+                    <span class="field-label">开启每日签到（喵喵赐福）</span>
+                    <input type="checkbox" id="cfgEnableCheckin" class="switch">
+                  </label>
+                  <label class="field" data-field="checkin_fixed_reward">
+                    <span class="field-label">固定奖励次数</span>
+                    <input type="number" id="cfgCheckinFixed" class="input" min="0">
+                  </label>
+                  <label class="field field-row" data-field="enable_random_checkin">
+                    <span class="field-label">启用随机奖励</span>
+                    <input type="checkbox" id="cfgRandomCheckin" class="switch">
+                  </label>
+                  <label class="field" data-field="checkin_random_reward_min">
+                    <span class="field-label">随机奖励下限（次数）</span>
+                    <input type="number" id="cfgCheckinMin" class="input" min="0">
+                  </label>
+                  <label class="field" data-field="checkin_random_reward_max">
+                    <span class="field-label">随机奖励上限（次数）</span>
+                    <input type="number" id="cfgCheckinMax" class="input" min="0">
+                  </label>
+                </div>
+              </div>
+
+              <!-- 权限 -->
+              <div class="card" id="card-permissions">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">权限白名单 / 黑名单</h3>
+                    <p class="card-desc">用户与群组黑白名单，留空表示不限制。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field" data-field="user_whitelist">
+                    <span class="field-label">用户白名单（每行一个 QQ，空=全部）</span>
+                    <textarea id="cfgUserWhite" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                  </label>
+                  <label class="field" data-field="user_blacklist">
+                    <span class="field-label">用户黑名单（每行一个 QQ）</span>
+                    <textarea id="cfgUserBlack" class="input" rows="3" placeholder="QQ号，每行一个"></textarea>
+                  </label>
+                  <label class="field" data-field="group_whitelist">
+                    <span class="field-label">群白名单（每行一个群号，空=全部）</span>
+                    <textarea id="cfgGroupWhite" class="input" rows="3" placeholder="群号，每行一个"></textarea>
+                  </label>
+                  <label class="field" data-field="group_blacklist">
+                    <span class="field-label">群黑名单（每行一个群号）</span>
+                    <textarea id="cfgGroupBlack" class="input" rows="3" placeholder="群号，每行一个"></textarea>
+                  </label>
+                </div>
+              </div>
+
+              <!-- 帮助菜单 -->
+              <div class="card" id="card-help">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">帮助菜单定制</h3>
+                    <p class="card-desc">自定义指令帮助菜单输出文本，留空使用内置默认说明。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field" data-field="help_menu">
+                    <span class="field-label">帮助菜单（空=默认）</span>
+                    <textarea id="cfgHelpMenu" class="input" rows="5" placeholder="自定义帮助文本，留空使用默认"></textarea>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 保存按钮栏 -->
           <div class="settings-save">
             <button type="button" class="btn btn-accent" id="btnConfigSave">保存设置</button>
           </div>
         </section>
 
-        <!-- ============ 页面：画师预设 ============ -->
-        <section class="page" data-page="artists" id="page-artists" hidden aria-label="画师预设">
-          <div class="card">
-            <div class="card-head">
-              <div>
-                <h3 class="card-title">画师预设</h3>
-                <p class="card-desc">全局画师串预设库（名字 + 画师串 + 负面词），并按群启用。</p>
-              </div>
-              <div class="card-actions">
-                <button type="button" class="btn btn-accent" id="btnArtistPresetsSave">保存预设</button>
-              </div>
+        <!-- ============ 页面：预设管理 ============ -->
+        <section class="page" data-page="artists" id="page-artists" hidden aria-label="预设管理">
+          <div class="card tab-header-card">
+            <div class="sub-tabs-bar" role="tablist" aria-label="预设分类">
+              <button type="button" class="sub-tab-btn is-active" data-subtab="artist-subtab" role="tab" aria-selected="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><circle cx="11" cy="11" r="2"/></svg>
+                <span>画师串预设</span>
+              </button>
+              <button type="button" class="sub-tab-btn" data-subtab="prompt-subtab" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                <span>绘图 Prompt 预设</span>
+              </button>
             </div>
-            <div class="table-wrap">
-              <table class="table" id="artistPresetsTable">
-                <thead>
-                  <tr>
-                    <th style="width:22%">预设名</th>
-                    <th style="width:38%">画师串</th>
-                    <th style="width:33%">负面词</th>
-                    <th style="width:7%">操作</th>
-                  </tr>
-                </thead>
-                <tbody id="artistPresetsBody">
-                  <tr class="row-empty"><td colspan="4"><div class="skel"><span class="caret"></span>加载画师预设中…</div></td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div class="card-foot">
-              <button type="button" class="btn btn-ghost btn-sm" id="btnArtistPresetsAdd">+ 添加预设</button>
-              <span class="card-foot-note" id="artistPresetsNote">画师串如 `artist:xxx, artist:yyy`，负面词可留空</span>
-            </div>
+          </div>
 
-            <div class="group-switch-block">
+          <!-- 子面板 1：画师串预设 -->
+          <div class="sub-panel" id="panel-artist-subtab">
+            <div class="card">
               <div class="card-head">
                 <div>
-                  <h3 class="card-title">按群启用</h3>
-                  <p class="card-desc">为指定群设置画师串预设；也可在群里用「画师串 预设名」指令切换。</p>
+                  <h3 class="card-title">画师预设库</h3>
+                  <p class="card-desc">全局画师串预设（名称 + 画师串 + 负面词），并支持按群单独指定启用。</p>
+                </div>
+                <div class="card-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" id="btnArtistImport">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span>导入预设</span>
+                  </button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="btnArtistExport">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    <span>导出预设</span>
+                  </button>
+                  <button type="button" class="btn btn-accent btn-sm" id="btnArtistPresetsSave">保存预设</button>
                 </div>
               </div>
-              <div class="form form-grid">
-                <label class="field">
-                  <span class="field-label">群 ID</span>
-                  <input type="text" id="artistGroupId" class="input" placeholder="群号">
-                </label>
-                <label class="field">
-                  <span class="field-label">预设</span>
-                  <select id="artistGroupPreset" class="input">
-                    <option value="">（请先保存预设）</option>
-                  </select>
-                </label>
-                <div class="field field-row" style="grid-column: 1 / -1;">
-                  <div class="card-actions">
-                    <button type="button" class="btn btn-ghost btn-sm" id="btnArtistGroupSave">设为该预设</button>
-                    <button type="button" class="btn btn-danger btn-sm" id="btnArtistGroupOff">关闭</button>
+              <div class="table-wrap">
+                <table class="table" id="artistPresetsTable">
+                  <thead>
+                    <tr>
+                      <th style="width:22%">预设名</th>
+                      <th style="width:38%">画师串</th>
+                      <th style="width:33%">负面词</th>
+                      <th style="width:7%">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="artistPresetsBody">
+                    <tr class="row-empty"><td colspan="4"><div class="skel"><span class="caret"></span>加载画师预设中…</div></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="card-foot">
+                <button type="button" class="btn btn-ghost btn-sm" id="btnArtistPresetsAdd">+ 添加预设</button>
+                <span class="card-foot-note" id="artistPresetsNote">画师串如 `artist:xxx, artist:yyy`，负面词可留空</span>
+              </div>
+
+              <div class="group-switch-block">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">按群启用</h3>
+                    <p class="card-desc">为指定群设置默认画师串预设；也可在群里用「画师串 预设名」指令随时切换。</p>
                   </div>
                 </div>
+                <div class="form form-grid">
+                  <label class="field">
+                    <span class="field-label">群 ID</span>
+                    <input type="text" id="artistGroupId" class="input" placeholder="群号">
+                  </label>
+                  <label class="field">
+                    <span class="field-label">预设</span>
+                    <select id="artistGroupPreset" class="input">
+                      <option value="">（请先保存预设）</option>
+                    </select>
+                  </label>
+                  <div class="field field-row" style="grid-column: 1 / -1;">
+                    <div class="card-actions">
+                      <button type="button" class="btn btn-ghost btn-sm" id="btnArtistGroupSave">设为该预设</button>
+                      <button type="button" class="btn btn-danger btn-sm" id="btnArtistGroupOff">关闭</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="group-map-list" id="artistGroupMap"></div>
               </div>
-              <div class="group-map-list" id="artistGroupMap"></div>
+            </div>
+          </div>
+
+          <!-- 子面板 2：绘图 Prompt 预设 -->
+          <div class="sub-panel" id="panel-prompt-subtab" hidden>
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h3 class="card-title">生图预设 Prompt（40+ 原生指令预设）</h3>
+                  <p class="card-desc">每行一条或段落形式，格式为「触发词:提示词」。如：手办化:Your task is to convert...</p>
+                </div>
+                <div class="card-actions">
+                  <button type="button" class="btn btn-accent" id="btnPromptPresetSave">保存预设 Prompt</button>
+                </div>
+              </div>
+              <div class="form">
+                <label class="field">
+                  <span class="field-label">预设 Prompt 列表<i class="field-hint">支持跨行提示词，修改后即时热重载生效</i></span>
+                  <textarea id="cfgPromptList" class="input" rows="18" placeholder="手办化:Your task is to...&#10;Q版化:Your task is to..."></textarea>
+                </label>
+              </div>
             </div>
           </div>
         </section>
@@ -866,11 +1174,68 @@
     </div>
   </div>
 
+  <!-- ======== 导入画师预设弹层 ======== -->
+  <div class="modal-mask" id="artistImportModal" hidden>
+    <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="artistImportTitle">
+      <div class="modal-head">
+        <h3 id="artistImportTitle">导入画师预设 / 夺舍幻笔</h3>
+        <button type="button" class="btn-icon" id="artistImportClose" aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <!-- 自动检测到本地 AstrBot 幻笔插件时的夺舍条 -->
+        <div class="detect-banner" id="artistDetectBanner" hidden style="background:var(--accent-glow);border:1px solid var(--accent);border-radius:var(--radius-md);padding:12px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <div>
+            <div style="font-weight:600;color:var(--accent);font-size:13px;" id="artistDetectTitle">⚡ 检测到本地已安装 AstrBot 幻笔插件</div>
+            <div style="font-size:12px;color:var(--text-2nd);margin-top:2px;" id="artistDetectDesc">包含画师预设，点击即可直接一键夺舍导入</div>
+          </div>
+          <button type="button" class="btn btn-accent btn-sm" id="btnNaiBrushTakeover" style="white-space:nowrap;">一键夺舍导入</button>
+        </div>
+
+        <p class="modal-desc">支持智能识别导入：<b>Rainnya 预设分享包</b>、<b>AstrBot 幻笔插件配置文件 (config.json)</b>、或<b>云崽老幻笔 Key-Value 格式</b>。</p>
+
+        <div style="margin-bottom:12px;display:flex;gap:10px;">
+          <input type="file" id="artistImportFileInput" accept=".json" style="display:none">
+          <button type="button" class="btn btn-ghost btn-sm" id="btnChooseImportFile">
+            <svg viewBox="0 0 24 24" aria-hidden="true" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>选择本地 JSON 文件</span>
+          </button>
+          <span id="importFileTip" style="font-size:12px;color:var(--text-3rd);align-self:center;">未选择文件</span>
+        </div>
+
+        <label class="field">
+          <span class="field-label">或直接在此粘贴 JSON 文本</span>
+          <textarea id="artistImportText" class="input textarea" rows="7" placeholder='支持以下任意格式：
+1. 咱们的分享包：{"presets": [{"name":"xx", "artists":"yy", "negative":"zz"}]}
+2. 幻笔 config.json：{"model": {"artist_presets": [...]}}
+3. 云崽老幻笔字典：{"水彩": "artist:xxx, 1girl...", "赛博": "artist:yyy..."}'></textarea>
+        </label>
+
+        <div style="margin-top:12px;">
+          <span class="field-label" style="display:block;margin-bottom:6px;">导入模式</span>
+          <label style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;cursor:pointer;font-size:13px;">
+            <input type="radio" name="artistImportMode" value="merge" checked>
+            <span>增量合并（推荐，同名更新）</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;">
+            <input type="radio" name="artistImportMode" value="overwrite">
+            <span>全量覆盖（清空现有预设）</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="artistImportCancel">取消</button>
+        <button type="button" class="btn btn-accent" id="artistImportConfirm">开始导入</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ======== Toast 容器 ======== -->
   <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
   <!-- 显式先加载 bridge SDK，保证 app.js 同步取到 window.AstrBotPluginPage（AstrBot 见已有此标签则不再重复注入） -->
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js"></script>
+  <script src="./app.js?v=1.2.0"></script>
 </body>
 </html>

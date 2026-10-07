@@ -153,18 +153,45 @@
     }).join("");
   }
 
+  var isProviderDirty = false;
+  function markProviderDirty() { isProviderDirty = true; }
+
+  function syncModelsDataFromDOM() {
+    var rows = el("modelsBody").querySelectorAll("tr[data-i]");
+    rows.forEach(function (tr) {
+      var i = parseInt(tr.getAttribute("data-i"), 10);
+      if (isNaN(i) || !modelsData[i]) return;
+      tr.querySelectorAll("[data-k]").forEach(function (inp) {
+        var k = inp.getAttribute("data-k");
+        var v = inp.value.trim();
+        if (k === "name") modelsData[i].name = v;
+        else if (k === "quota") modelsData[i].quota = parseInt(v, 10) || 1;
+        else if (k === "desc") modelsData[i].desc = v;
+        else if (k === "params") {
+          try {
+            var parsed = JSON.parse(v);
+            modelsData[i].params = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+          } catch (e) {}
+        } else if (k === "sizes") modelsData[i].allowed_sizes = sizesFromSel(v);
+      });
+    });
+  }
+
   function collectModels() {
+    syncModelsDataFromDOM();
     var rows = el("modelsBody").querySelectorAll("tr[data-i]");
     var out = [];
     var seen = {};
     var ok = true;
     rows.forEach(function (tr) {
       var m = { name: "", quota: 1, desc: "", params: {}, allowed_sizes: null };
+      var hasAnyInput = false;
       tr.querySelectorAll("[data-k]").forEach(function (inp) {
         var k = inp.getAttribute("data-k");
         var v = inp.value.trim();
+        if (v) hasAnyInput = true;
         if (k === "name") m.name = v;
-        else if (k === "quota") m.quota = parseInt(v, 10);
+        else if (k === "quota") m.quota = parseInt(v, 10) || 1;
         else if (k === "desc") m.desc = v;
         else if (k === "params") {
           if (!v) m.params = {};
@@ -180,7 +207,9 @@
           }
         } else if (k === "sizes") m.allowed_sizes = sizesFromSel(v);
       });
+      // 容错：未填模型名且无其他内容的空行（添加但未填的草稿行），自动略过，不阻断整体保存
       if (!m.name) {
+        if (!hasAnyInput) return;
         ok = false;
         var nm = tr.querySelector('[data-k="name"]');
         if (nm) nm.classList.add("invalid");
@@ -206,22 +235,69 @@
     }
   }
 
-  async function saveProviderModels() {
+  /* 统一整页保存：配置与模型同时落盘，彻底解决分卡片保存导致的未保存与状态脱节 */
+  async function saveEntireProvider() {
     if (currentProviderId == null) return;
+    var name = el("pdName").value.trim();
+    if (!name) {
+      el("pdName").classList.add("invalid");
+      toast("请填写提供商名字", "error");
+      return;
+    }
     var r = collectModels();
-    if (!r.ok) { toast("模型信息不合法：请检查模型名非空、参数 JSON 合法", "error"); return; }
-    var btn = el("btnModelsSave");
-    btn.disabled = true;
+    if (!r.ok) {
+      toast("模型信息不合法：请检查模型名非空、参数 JSON 格式合法", "error");
+      return;
+    }
+    var key = el("pdApiKey").value.trim();
+    var url = el("pdBaseUrl").value.trim();
+    var userUrl = el("pdUserUrl").value.trim();
+    var btnAll = el("btnProviderSaveAll");
+    var btnCfg = el("btnProviderCfgSave");
+    var btnModels = el("btnModelsSave");
+    if (btnAll) btnAll.disabled = true;
+    if (btnCfg) btnCfg.disabled = true;
+    if (btnModels) btnModels.disabled = true;
     try {
+      // 1. 保存提供商连接信息
+      await apiPost("providers/save", {
+        id: currentProviderId, name: name, api_key: key, base_url: url,
+        user_url: userUrl,
+        enabled: el("pdEnabled").checked,
+        use_reverse_proxy: el("pdReverseProxy").checked,
+      });
+      // 2. 保存模型列表
       var res = await apiPost("providers/models", { provider: currentProviderId, models: r.models });
       modelsData = r.models;
       renderModels();
-      toast("已保存 " + (res && res.count != null ? res.count : r.models.length) + " 个模型", "success");
+      el("pdApiKey").value = ""; // 清空未保存掩码
+      el("pdTitle").textContent = name;
+      isProviderDirty = false;
+      // 3. 同步上级 providersData 缓存
+      for (var i = 0; i < providersData.length; i++) {
+        if (String(providersData[i].id) === String(currentProviderId)) {
+          providersData[i].name = name;
+          providersData[i].base_url = url;
+          providersData[i].user_url = userUrl;
+          providersData[i].enabled = el("pdEnabled").checked;
+          providersData[i].use_reverse_proxy = el("pdReverseProxy").checked;
+          providersData[i].model_count = modelsData.length;
+          break;
+        }
+      }
+      renderProviders();
+      toast("提供商「" + name + "」与 " + modelsData.length + " 个模型已保存成功", "success");
     } catch (e) {
       toast("保存失败：" + e.message, "error");
     } finally {
-      btn.disabled = false;
+      if (btnAll) btnAll.disabled = false;
+      if (btnCfg) btnCfg.disabled = false;
+      if (btnModels) btnModels.disabled = false;
     }
+  }
+
+  async function saveProviderModels() {
+    return await saveEntireProvider();
   }
 
   /* ---- 提供商列表视图 ---- */
@@ -313,43 +389,21 @@
     syncReverseProxyField(p.type);
     showDetailView();
     await loadProviderModels(id);
+    isProviderDirty = false;
   }
 
-  function backToProviders() {
+  async function backToProviders() {
+    if (isProviderDirty) {
+      if (!(await confirmDialog("当前提供商有未保存的修改，确定返回吗？未保存的内容将丢失。", "未保存提示"))) return;
+    }
+    isProviderDirty = false;
     currentProviderId = null;
     showProvidersView();
     loadProviders(); // 刷新模型数等
   }
 
   async function saveProviderConfig() {
-    if (currentProviderId == null) return;
-    var name = el("pdName").value.trim();
-    if (!name) {
-      el("pdName").classList.add("invalid");
-      toast("请填写提供商名字", "error");
-      return;
-    }
-    var key = el("pdApiKey").value.trim();
-    var url = el("pdBaseUrl").value.trim();
-    var userUrl = el("pdUserUrl").value.trim();
-    var btn = el("btnProviderCfgSave");
-    btn.disabled = true;
-    try {
-      await apiPost("providers/save", {
-        id: currentProviderId, name: name, api_key: key, base_url: url,
-        user_url: userUrl,
-        enabled: el("pdEnabled").checked,
-        use_reverse_proxy: el("pdReverseProxy").checked,
-      });
-      el("pdApiKey").value = ""; // 已提交，清空掩码输入
-      el("pdTitle").textContent = name;
-      toast("提供商配置已保存", "success");
-      await loadProviders(); // 同步列表数据
-    } catch (e) {
-      toast("保存失败：" + e.message, "error");
-    } finally {
-      btn.disabled = false;
-    }
+    return await saveEntireProvider();
   }
 
   async function toggleProvider(p, next) {
@@ -444,10 +498,16 @@
     el("templateRow").querySelectorAll(".template-card").forEach(function (c) {
       c.classList.toggle("is-selected", c.getAttribute("data-type") === type);
     });
-    // 每次切换模板都自动更新 BaseURL 为该模板默认地址（覆盖用户已填内容）
+    // 仅在当前未填写或当前内容为其他模板默认地址时，才自动填充模板默认 BaseURL，防冲掉用户已粘贴的自建/反代地址
     var tpl = PROVIDER_TEMPLATES[type];
     if (tpl && tpl.base_url) {
-      el("provUrl").value = tpl.base_url;
+      var curUrl = el("provUrl").value.trim();
+      var isDefault = !curUrl || Object.keys(PROVIDER_TEMPLATES).some(function (k) {
+        return PROVIDER_TEMPLATES[k].base_url === curUrl;
+      });
+      if (isDefault) {
+        el("provUrl").value = tpl.base_url;
+      }
     }
     // 反代模式为 NovalAI 专属：随模板切换显隐
     syncReverseProxyField(type);
@@ -489,6 +549,246 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  /* ============================================================
+   * Tab 1.5 · 生图测试台 (Workbench Studio)
+   * ============================================================ */
+  var wbModelsData = [];
+  var wbSelectedModelObj = null;
+  var wbRefImageBase64 = null;
+  var wbTimerInterval = null;
+  var wbLastResult = null;
+
+  async function loadWorkbenchData() {
+    try {
+      var data = await apiGet("workbench/models");
+      wbModelsData = (data && data.models) || [];
+      renderWbModels();
+      renderWbPresetsDropdown();
+    } catch (e) {
+      toast("加载测试台模型失败：" + e.message, "error");
+    }
+  }
+
+  function renderWbModels() {
+    var sel = el("wbModel");
+    if (!sel) return;
+    if (!wbModelsData.length) {
+      sel.innerHTML = '<option value="">暂无可用模型（请先在提供商管理添加）</option>';
+      onWbModelChange("");
+      return;
+    }
+    // 按提供商名称分组
+    var groups = {};
+    wbModelsData.forEach(function (m) {
+      var gName = m.provider_name || "默认提供商";
+      if (!groups[gName]) groups[gName] = [];
+      groups[gName].push(m);
+    });
+    var html = "";
+    for (var g in groups) {
+      html += '<optgroup label="' + esc(g) + '">';
+      groups[g].forEach(function (m) {
+        html += '<option value="' + esc(m.name) + '">' + esc(m.name) + " (" + esc(m.provider_type) + ")" + "</option>";
+      });
+      html += "</optgroup>";
+    }
+    sel.innerHTML = html;
+    if (wbModelsData[0]) {
+      onWbModelChange(wbModelsData[0].name);
+    }
+  }
+
+  function renderWbPresetsDropdown() {
+    var sel = el("wbPresetSelect");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">选择画师预设…</option>' +
+      artistPresetsData.map(function (p) {
+        return '<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>";
+      }).join("");
+  }
+
+  function onWbModelChange(modelName) {
+    wbSelectedModelObj = wbModelsData.find(function (m) { return m.name === modelName; }) || null;
+    var badge = el("wbProviderBadge");
+    var desc = el("wbParamsDesc");
+    var naiSec = el("wbNaiSection");
+    var gemSec = el("wbGeminiSection");
+    var oaiSec = el("wbOpenaiSection");
+
+    if (!wbSelectedModelObj) {
+      if (badge) { badge.textContent = "未选模型"; badge.className = "badge neutral"; }
+      if (naiSec) naiSec.hidden = true;
+      if (gemSec) gemSec.hidden = true;
+      if (oaiSec) oaiSec.hidden = true;
+      return;
+    }
+
+    var pType = (wbSelectedModelObj.provider_type || "openai").toLowerCase();
+    var pName = wbSelectedModelObj.provider_name || "提供商";
+    if (badge) {
+      badge.textContent = pName + " (" + pType.toUpperCase() + ")";
+      badge.className = "badge " + (pType === "novalai" ? "accent" : (pType === "gemini" ? "success" : "neutral"));
+    }
+
+    // 自适应切换专属参数区
+    if (pType === "novalai") {
+      if (desc) desc.textContent = "NovelAI 专属生成参数：支持精细控制采样器、采样步数、CFG Scale 与分辨率档位。";
+      if (naiSec) naiSec.hidden = false;
+      if (gemSec) gemSec.hidden = true;
+      if (oaiSec) oaiSec.hidden = true;
+    } else if (pType === "gemini") {
+      if (desc) desc.textContent = "Gemini 原生专属参数：支持画质分辨率切换、安全过滤级别与温度控制。";
+      if (naiSec) naiSec.hidden = true;
+      if (gemSec) gemSec.hidden = false;
+      if (oaiSec) oaiSec.hidden = true;
+    } else {
+      if (desc) desc.textContent = "OpenAI 兼容参数：支持分辨率、Temperature 与 Max Tokens 微调。";
+      if (naiSec) naiSec.hidden = true;
+      if (gemSec) gemSec.hidden = true;
+      if (oaiSec) oaiSec.hidden = false;
+    }
+  }
+
+  function collectWbParams() {
+    var pType = (wbSelectedModelObj && wbSelectedModelObj.provider_type || "openai").toLowerCase();
+    var params = {};
+    var imageSize = "";
+
+    if (pType === "novalai") {
+      imageSize = el("wbNaiSize").value;
+      params.sampler = el("wbNaiSampler").value;
+      params.steps = parseInt(el("wbNaiSteps").value, 10) || 23;
+      params.scale = parseFloat(el("wbNaiScale").value) || 6.0;
+      var seedVal = el("wbNaiSeed").value.trim();
+      if (seedVal !== "") params.seed = parseInt(seedVal, 10);
+    } else if (pType === "gemini") {
+      imageSize = el("wbGeminiSize").value;
+      var safety = el("wbGeminiSafety").value;
+      if (safety) params.safety_level = safety;
+      params.temperature = parseFloat(el("wbGeminiTemp").value) || 0.9;
+    } else {
+      imageSize = el("wbOpenaiSize").value;
+      params.temperature = parseFloat(el("wbOpenaiTemp").value) || 1.0;
+      var mt = parseInt(el("wbOpenaiMaxTokens").value, 10);
+      if (!isNaN(mt) && mt > 0) params.max_tokens = mt;
+    }
+
+    return { imageSize: imageSize, params: params };
+  }
+
+  async function doWorkbenchGenerate() {
+    var prompt = el("wbPrompt").value.trim();
+    if (!prompt) {
+      el("wbPrompt").classList.add("invalid");
+      toast("请填写正向提示词 (Prompt)", "error");
+      return;
+    }
+    el("wbPrompt").classList.remove("invalid");
+
+    var model = el("wbModel").value;
+    var neg = el("wbNegative").value.trim();
+    var cfg = collectWbParams();
+
+    var payload = {
+      model: model,
+      prompt: prompt,
+      negative_prompt: neg,
+      image_size: cfg.imageSize,
+      params: cfg.params,
+      reference_image: wbRefImageBase64,
+    };
+
+    // UI 切换为加载中
+    var btn = el("btnWbGenerate");
+    btn.disabled = true;
+    el("wbEmptyState").hidden = true;
+    el("wbResultView").hidden = true;
+    el("wbResultActions").hidden = true;
+    el("wbLoadingState").hidden = false;
+    el("wbLoadingTitle").textContent = "正在向「" + (model || "默认模型") + "」发送生图请求…";
+
+    var startTime = Date.now();
+    el("wbLoadingTimer").textContent = "耗时：0.0s";
+    if (wbTimerInterval) clearInterval(wbTimerInterval);
+    wbTimerInterval = setInterval(function () {
+      var s = ((Date.now() - startTime) / 1000).toFixed(1);
+      el("wbLoadingTimer").textContent = "耗时：" + s + "s";
+    }, 100);
+
+    try {
+      var res = await apiPost("workbench/generate", payload);
+      wbLastResult = res;
+      el("wbLoadingState").hidden = true;
+      el("wbResultView").hidden = false;
+      el("wbResultActions").hidden = false;
+      el("wbResultImg").src = res.image_base64;
+      el("wbResultMeta").textContent = "生成成功！实际模型: " + res.model + " · 用时 " + res.elapsed + "s · 大小 " + Math.round(res.size_bytes / 1024) + " KB";
+      toast("生图测试完成！耗时 " + res.elapsed + "s", "success");
+    } catch (e) {
+      el("wbLoadingState").hidden = true;
+      el("wbEmptyState").hidden = false;
+      toast("生成失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      if (wbTimerInterval) clearInterval(wbTimerInterval);
+    }
+  }
+
+  function downloadWbImage() {
+    if (!wbLastResult || !wbLastResult.image_base64) return;
+    var a = document.createElement("a");
+    a.href = wbLastResult.image_base64;
+    var now = new Date();
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var ts = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + "_" + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+    a.download = "workbench_" + (wbLastResult.model || "gen") + "_" + ts + ".png";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast("已开始下载生成图片", "success");
+  }
+
+  function resetWbForm() {
+    el("wbPrompt").value = "";
+    el("wbNegative").value = "";
+    clearWbRefImage();
+    el("wbNaiSteps").value = 23;
+    el("wbNaiStepsVal").textContent = "23";
+    el("wbNaiScale").value = 6.0;
+    el("wbNaiScaleVal").textContent = "6.0";
+    el("wbNaiSeed").value = "";
+    el("wbGeminiTemp").value = 0.9;
+    el("wbGeminiTempVal").textContent = "0.9";
+    el("wbOpenaiTemp").value = 1.0;
+    el("wbOpenaiTempVal").textContent = "1.0";
+    el("wbEmptyState").hidden = false;
+    el("wbResultView").hidden = true;
+    el("wbResultActions").hidden = true;
+    toast("测试台参数已重置", "info");
+  }
+
+  function clearWbRefImage() {
+    wbRefImageBase64 = null;
+    el("wbRefFileInput").value = "";
+    el("wbRefEmptyView").hidden = false;
+    el("wbRefPreviewView").hidden = true;
+    el("btnWbClearRef").hidden = true;
+  }
+
+  function loadLogToWorkbench(ts) {
+    var r = logItems.find(function (it) { return it.timestamp === ts; });
+    if (!r) return;
+    switchPage("workbench");
+    setTimeout(function () {
+      if (r.prompt) el("wbPrompt").value = r.prompt;
+      if (r.model && el("wbModel")) {
+        el("wbModel").value = r.model;
+        onWbModelChange(r.model);
+      }
+      toast("已从日志载入提示词与模型到测试台", "info");
+    }, 100);
   }
 
   /* ============================================================
@@ -706,6 +1006,7 @@
         '<span class="log-model">模型：' + esc(r.model || "?") + "</span>" +
         "</div>" +
         '<div class="log-actions">' +
+        '<button type="button" class="btn btn-ghost btn-sm" data-act="load-wb">载入测试台</button>' +
         '<button type="button" class="btn btn-ghost btn-sm" data-act="view">查看大图</button>' +
         '<button type="button" class="btn btn-danger btn-sm" data-act="del">删除</button>' +
         "</div>" +
@@ -972,6 +1273,192 @@
     }
   }
 
+  /* 画师预设导出与导入 / 夺舍幻笔 */
+  async function exportArtistPresets() {
+    try {
+      var data = await apiGet("artist-presets/export");
+      var jsonStr = JSON.stringify(data, null, 2);
+      var blob = new Blob([jsonStr], { type: "application/json;charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      var now = new Date();
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var ts = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + "_" + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+      a.href = url;
+      a.download = "rainnya_artist_presets_" + ts + ".json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast("已导出 " + ((data && data.presets && data.presets.length) || 0) + " 个画师预设", "success");
+    } catch (e) {
+      toast("导出失败：" + e.message, "error");
+    }
+  }
+
+  var detectedNaiPresets = null;
+
+  async function openArtistImportModal() {
+    el("artistImportText").value = "";
+    el("importFileTip").textContent = "未选择文件";
+    el("artistImportFileInput").value = "";
+    el("artistDetectBanner").hidden = true;
+    detectedNaiPresets = null;
+    openModal("artistImportModal");
+    // 异步探测本地已安装的 AstrBot 幻笔插件
+    try {
+      var det = await apiGet("artist-presets/detect-nai-brush");
+      if (det && det.found && det.count > 0) {
+        detectedNaiPresets = det.presets;
+        el("artistDetectTitle").textContent = "⚡ 检测到本地已安装 AstrBot 幻笔插件（发现 " + det.count + " 个预设）";
+        el("artistDetectDesc").textContent = "配置文件：" + det.path + "，点击右侧按钮直接一键夺舍导入";
+        el("artistDetectBanner").hidden = false;
+      }
+    } catch (e) {}
+  }
+
+  async function takeoverNaiBrush() {
+    if (!detectedNaiPresets || !detectedNaiPresets.length) return;
+    var mode = (document.querySelector('input[name="artistImportMode"]:checked') || {}).value || "merge";
+    if (mode === "overwrite" && !(await confirmDialog("全量覆盖将清空您现有的所有画师预设，确定要继续夺舍覆盖吗？", "夺舍确认"))) return;
+    try {
+      var res = await apiPost("artist-presets/import", { data: detectedNaiPresets, mode: mode });
+      closeModal("artistImportModal");
+      await loadArtistPresets();
+      toast("夺舍成功！已从幻笔插件导入 " + res.imported_count + " 个预设（当前共 " + res.total_count + " 个）", "success");
+    } catch (e) {
+      toast("夺舍失败：" + e.message, "error");
+    }
+  }
+
+  async function doImportArtistPresets() {
+    var text = el("artistImportText").value.trim();
+    if (!text) {
+      toast("请先选择本地 JSON 文件或粘贴预设内容", "error");
+      return;
+    }
+    var parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      toast("JSON 格式错误，请检查文本是否为合法 JSON", "error");
+      return;
+    }
+    var mode = (document.querySelector('input[name="artistImportMode"]:checked') || {}).value || "merge";
+    if (mode === "overwrite" && !(await confirmDialog("全量覆盖将清空您现有的所有画师预设，确定要继续覆盖吗？", "导入确认"))) return;
+    var btn = el("artistImportConfirm");
+    btn.disabled = true;
+    try {
+      var res = await apiPost("artist-presets/import", { data: parsed, mode: mode });
+      closeModal("artistImportModal");
+      await loadArtistPresets();
+      toast("导入成功！从【" + (res.source_type || "JSON") + "】导入 " + res.imported_count + " 个预设（共 " + res.total_count + " 个）", "success");
+    } catch (e) {
+      toast("导入失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ============================================================
+   * 设置分栏 Tab & 预设子 Tab 控制
+   * ============================================================ */
+  var CFG_TAB_CURRENT = "tab-params"; // "tab-params" | "tab-defense" | "tab-enhancement" | "tab-base"
+  var SUBTAB_CURRENT = "artist-subtab"; // "artist-subtab" | "prompt-subtab"
+
+  // 字段所属分栏映射表（用于校验失败时自动定位并切换到对应的 Tab）
+  var FIELD_TAB_MAP = {
+    // 参数设定
+    openai_size: "tab-params", openai_temperature: "tab-params", openai_max_tokens: "tab-params",
+    safety_level: "tab-params", image_size: "tab-params", hires_whitelist: "tab-params",
+    novalai_size: "tab-params", novalai_sampler: "tab-params", novalai_steps: "tab-params",
+    novalai_scale: "tab-params", novalai_negative_prompt: "tab-params",
+    novai_precheck_enabled: "tab-params", novai_precheck_timeout: "tab-params", novai_point_warn_threshold: "tab-params",
+    // 绘图防护
+    auto_recall_enabled: "tab-defense", auto_recall_delay: "tab-defense", auto_recall_allowed_groups: "tab-defense",
+    nsfw_filter_enabled: "tab-defense", nsfw_filter_tags: "tab-defense", nsfw_zip_enabled: "tab-defense",
+    // 增强模块
+    tagger_provider_id: "tab-enhancement", tagger_temperature: "tab-enhancement", tagger_max_tokens: "tab-enhancement",
+    artist_recommend_enabled: "tab-enhancement", artist_recommend_max_candidates: "tab-enhancement", artist_recommend_min_match: "tab-enhancement",
+    selfie_prompt: "tab-enhancement",
+    // 基础设定
+    prefix: "tab-base", extra_prefix: "tab-base", use_proxy: "tab-base", proxy_url: "tab-base",
+    download_timeout: "tab-base", download_retries: "tab-base", api_timeout: "tab-base",
+    enable_user_limit: "tab-base", enable_group_limit: "tab-base", user_count_cap: "tab-base", group_task_limit: "tab-base",
+    enable_checkin: "tab-base", checkin_fixed_reward: "tab-base", enable_random_checkin: "tab-base",
+    checkin_random_reward_min: "tab-base", checkin_random_reward_max: "tab-base",
+    user_whitelist: "tab-base", user_blacklist: "tab-base", group_whitelist: "tab-base", group_blacklist: "tab-base",
+    help_menu: "tab-base"
+  };
+
+  // 字段与 DOM 元素 ID 映射表
+  var FIELD_ELEMENT_MAP = {
+    openai_size: "cfgOpenaiSize", openai_temperature: "cfgOpenaiTemp", openai_max_tokens: "cfgOpenaiMaxTokens",
+    safety_level: "cfgSafety", image_size: "cfgImageSize", hires_whitelist: "cfgHires",
+    novalai_size: "cfgNovalaiSize", novalai_sampler: "cfgNovalaiSampler", novalai_steps: "cfgNovalaiSteps",
+    novalai_scale: "cfgNovalaiScale", novalai_negative_prompt: "cfgNovalaiNeg",
+    novai_precheck_enabled: "cfgNovaiPrecheck", novai_precheck_timeout: "cfgNovaiPrecheckTimeout", novai_point_warn_threshold: "cfgNovaiWarn",
+    auto_recall_enabled: "cfgAutoRecall", auto_recall_delay: "cfgAutoRecallDelay", auto_recall_allowed_groups: "cfgAutoRecallGroups",
+    nsfw_filter_enabled: "cfgNsfwFilter", nsfw_filter_tags: "cfgNsfwTags", nsfw_zip_enabled: "cfgNsfwZipEnabled",
+    tagger_provider_id: "cfgTaggerProvider", tagger_temperature: "cfgTaggerTemp", tagger_max_tokens: "cfgTaggerMaxTokens",
+    artist_recommend_enabled: "cfgArtistRecEnabled", artist_recommend_max_candidates: "cfgArtistRecMax", artist_recommend_min_match: "cfgArtistRecMin",
+    selfie_prompt: "cfgSelfiePrompt",
+    prefix: "cfgPrefix", extra_prefix: "cfgExtraPrefix", use_proxy: "cfgUseProxy", proxy_url: "cfgProxyUrl",
+    download_timeout: "cfgDownloadTimeout", download_retries: "cfgDownloadRetries", api_timeout: "cfgApiTimeout",
+    enable_user_limit: "cfgEnableUser", enable_group_limit: "cfgEnableGroup", user_count_cap: "cfgUserCap", group_task_limit: "cfgTaskLimit",
+    enable_checkin: "cfgEnableCheckin", checkin_fixed_reward: "cfgCheckinFixed", enable_random_checkin: "cfgRandomCheckin",
+    checkin_random_reward_min: "cfgCheckinMin", checkin_random_reward_max: "cfgCheckinMax",
+    user_whitelist: "cfgUserWhite", user_blacklist: "cfgUserBlack", group_whitelist: "cfgGroupWhite", group_blacklist: "cfgGroupBlack",
+    help_menu: "cfgHelpMenu", prompt_list: "cfgPromptList"
+  };
+
+  function switchConfigTab(tabId) {
+    CFG_TAB_CURRENT = tabId;
+    document.querySelectorAll(".sub-tab-btn[data-cfgtab]").forEach(function (btn) {
+      var active = btn.getAttribute("data-cfgtab") === tabId;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll(".cfg-tab-panel").forEach(function (p) {
+      p.hidden = p.id !== "panel-" + tabId;
+    });
+  }
+
+  function switchPresetSubTab(subtabId) {
+    SUBTAB_CURRENT = subtabId;
+    document.querySelectorAll(".sub-tab-btn[data-subtab]").forEach(function (btn) {
+      var active = btn.getAttribute("data-subtab") === subtabId;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    el("panel-artist-subtab").hidden = (subtabId !== "artist-subtab");
+    el("panel-prompt-subtab").hidden = (subtabId !== "prompt-subtab");
+  }
+
+  function clearFieldErrors() {
+    document.querySelectorAll(".input.is-invalid").forEach(function (input) {
+      input.classList.remove("is-invalid");
+    });
+  }
+
+  function highlightFieldError(fieldKey, errorMsg) {
+    clearFieldErrors();
+    var tabId = FIELD_TAB_MAP[fieldKey];
+    if (tabId) {
+      switchConfigTab(tabId);
+    }
+    var elemId = FIELD_ELEMENT_MAP[fieldKey];
+    var elem = elemId ? el(elemId) : null;
+    if (elem) {
+      elem.classList.add("is-invalid");
+      elem.focus();
+      if (elem.scrollIntoView) {
+        elem.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+    toast(errorMsg, "error");
+  }
+
   /* ============================================================
    * Tab 4 · 基础设置
    * ============================================================ */
@@ -1080,7 +1567,87 @@
     return out.filter(function (p) { return p.indexOf(":") > 0; });
   }
 
+  // 客户端友好校验规则
+  function validateConfigBeforeSave() {
+    clearFieldErrors();
+
+    // 1. 基础设定校验
+    if (el("cfgUseProxy").checked && !el("cfgProxyUrl").value.trim()) {
+      highlightFieldError("proxy_url", "基础设定 → 代理地址：启用代理后必须填写代理地址 (如 http://127.0.0.1:7890)");
+      return false;
+    }
+    var dlTimeout = parseInt(el("cfgDownloadTimeout").value, 10);
+    if (isNaN(dlTimeout) || dlTimeout < 1) {
+      highlightFieldError("download_timeout", "基础设定 → 下载超时：必须填写大于等于 1 的秒数");
+      return false;
+    }
+    var apiTimeout = parseInt(el("cfgApiTimeout").value, 10);
+    if (isNaN(apiTimeout) || apiTimeout < 10) {
+      highlightFieldError("api_timeout", "基础设定 → API 超时：必须填写大于等于 10 的秒数");
+      return false;
+    }
+
+    // 2. 参数设定校验
+    var openAiTemp = el("cfgOpenaiTemp").value.trim();
+    if (openAiTemp !== "") {
+      var ot = parseFloat(openAiTemp);
+      if (isNaN(ot) || ot < 0 || ot > 2) {
+        highlightFieldError("openai_temperature", "参数设定 → OpenAI 温度：必须在 0.0 到 2.0 之间");
+        return false;
+      }
+    }
+    var openAiMaxTokens = el("cfgOpenaiMaxTokens").value.trim();
+    if (openAiMaxTokens !== "") {
+      var omt = parseInt(openAiMaxTokens, 10);
+      if (isNaN(omt) || omt < 64 || omt > 16384) {
+        highlightFieldError("openai_max_tokens", "参数设定 → OpenAI Max Tokens：必须在 64 到 16384 之间");
+        return false;
+      }
+    }
+
+    var novalaiSteps = el("cfgNovalaiSteps").value.trim();
+    if (novalaiSteps !== "") {
+      var ns = parseInt(novalaiSteps, 10);
+      if (isNaN(ns) || ns < 1 || ns > 50) {
+        highlightFieldError("novalai_steps", "参数设定 → NovelAI 采样步数：必须在 1 到 50 之间");
+        return false;
+      }
+    }
+    var novalaiScale = el("cfgNovalaiScale").value.trim();
+    if (novalaiScale !== "") {
+      var nsc = parseFloat(novalaiScale);
+      if (isNaN(nsc) || nsc < 0 || nsc > 10) {
+        highlightFieldError("novalai_scale", "参数设定 → NovelAI 引导强度：必须在 0.0 到 10.0 之间");
+        return false;
+      }
+    }
+
+    // 3. 增强模块校验
+    var taggerTemp = el("cfgTaggerTemp").value.trim();
+    if (taggerTemp !== "") {
+      var tt = parseFloat(taggerTemp);
+      if (isNaN(tt) || tt < 0 || tt > 2) {
+        highlightFieldError("tagger_temperature", "增强模块 → 打标温度：必须在 0.0 到 2.0 之间");
+        return false;
+      }
+    }
+
+    // 4. 次数与签到
+    if (el("cfgEnableCheckin").checked && el("cfgRandomCheckin").checked) {
+      var cMin = parseInt(el("cfgCheckinMin").value, 10) || 0;
+      var cMax = parseInt(el("cfgCheckinMax").value, 10) || 0;
+      if (cMin > cMax) {
+        highlightFieldError("checkin_random_reward_min", "基础设定 → 签到系统：随机奖励下限不能大于上限");
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   async function saveConfig() {
+    if (!validateConfigBeforeSave()) return;
+
     var body = {
       /* 基础 */
       prefix: el("cfgPrefix").checked,
@@ -1142,17 +1709,47 @@
       enable_random_checkin: el("cfgRandomCheckin").checked,
       checkin_random_reward_min: parseInt(el("cfgCheckinMin").value, 10) || 0,
       checkin_random_reward_max: parseInt(el("cfgCheckinMax").value, 10) || 0,
-      /* 帮助与预设 */
+      /* 帮助菜单 */
       help_menu: el("cfgHelpMenu").value,
-      prompt_list: parsePromptList(el("cfgPromptList").value),
     };
     var btn = el("btnConfigSave");
     btn.disabled = true;
     try {
       await apiPost("config", body);
+      clearFieldErrors();
       toast("设置已保存", "success");
     } catch (e) {
-      toast("保存失败：" + e.message, "error");
+      // 解析后端友好的错误提示，匹配对应字段进行定位高亮
+      var errMsg = e.message || "未知错误";
+      var matchedField = null;
+      for (var fKey in FIELD_ELEMENT_MAP) {
+        if (errMsg.indexOf(fKey) >= 0) {
+          matchedField = fKey;
+          break;
+        }
+      }
+      if (matchedField) {
+        highlightFieldError(matchedField, "保存失败：" + errMsg);
+      } else {
+        toast("保存失败：" + errMsg, "error");
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // 单独保存绘图 Prompt 预设
+  async function savePromptPresets() {
+    clearFieldErrors();
+    var parsed = parsePromptList(el("cfgPromptList").value);
+    var btn = el("btnPromptPresetSave");
+    btn.disabled = true;
+    try {
+      await apiPost("config", { prompt_list: parsed });
+      toast("绘图 Prompt 预设已保存（" + parsed.length + " 条）", "success");
+    } catch (e) {
+      var errMsg = e.message || "未知错误";
+      highlightFieldError("prompt_list", "保存失败：" + errMsg);
     } finally {
       btn.disabled = false;
     }
@@ -1161,10 +1758,14 @@
   /* ============================================================
    * 导航 / 事件绑定
    * ============================================================ */
-  var PAGE_TITLES = { models: "提供商管理", counts: "次数管理", logs: "生图日志", artists: "画师预设", settings: "基础设置" };
+  var PAGE_TITLES = { models: "提供商管理", workbench: "生图测试台", counts: "次数管理", logs: "生图日志", artists: "预设", settings: "设置" };
   var CURRENT = "models";
 
-  function switchPage(name) {
+  async function switchPage(name) {
+    if (CURRENT === "models" && providerView === "detail" && isProviderDirty && name !== "models") {
+      if (!(await confirmDialog("当前提供商有未保存的修改，确定离开吗？未保存的内容将丢失。", "未保存提示"))) return;
+      isProviderDirty = false;
+    }
     CURRENT = name;
     document.querySelectorAll(".nav-item").forEach(function (b) {
       var active = b.getAttribute("data-nav") === name;
@@ -1185,11 +1786,13 @@
         loadProviders();
       }
     }
+    else if (CURRENT === "workbench") loadWorkbenchData();
     else if (CURRENT === "counts") loadCounts(true);
     else if (CURRENT === "logs") loadLogs(true);
     else if (CURRENT === "artists") {
       loadArtistPresets();
       loadArtistGroups();
+      loadConfig(); // 同时加载 prompt_list
     }
     else if (CURRENT === "settings") loadConfig();
   }
@@ -1211,7 +1814,8 @@
     el("btnDeleteProvider").addEventListener("click", function () {
       if (currentProviderId != null) deleteProvider(currentProviderId);
     });
-    el("btnProviderCfgSave").addEventListener("click", saveProviderConfig);
+    if (el("btnProviderSaveAll")) el("btnProviderSaveAll").addEventListener("click", saveEntireProvider);
+    el("btnProviderCfgSave").addEventListener("click", saveEntireProvider);
     el("providersList").addEventListener("click", function (e) {
       var card = e.target.closest(".provider-card");
       if (!card) return;
@@ -1219,8 +1823,7 @@
       var actBtn = e.target.closest("[data-act]");
       if (actBtn) {
         var act = actBtn.getAttribute("data-act");
-        if (act === "models") openProvider(id);
-        else if (act === "edit") showEditProvider(id);
+        if (act === "models" || act === "edit") openProvider(id);
         else if (act === "del") deleteProvider(id);
         return; // toggle 开关走 change 事件，不进入详情
       }
@@ -1242,15 +1845,18 @@
 
     /* 模型（详情视图内，按当前提供商） */
     el("btnModelsAdd").addEventListener("click", function () {
+      syncModelsDataFromDOM();
       modelsData.push({ name: "", quota: 1, desc: "", params: {}, allowed_sizes: null });
       renderModels();
+      markProviderDirty();
       var last = el("modelsBody").querySelector('tr[data-i="' + (modelsData.length - 1) + '"]');
       if (last) { var nm = last.querySelector('[data-k="name"]'); if (nm) nm.focus(); }
     });
-    el("btnModelsSave").addEventListener("click", saveProviderModels);
+    el("btnModelsSave").addEventListener("click", saveEntireProvider);
     el("btnModelsReset").addEventListener("click", function () {
       if (currentProviderId == null) return;
       loadProviderModels(currentProviderId);
+      isProviderDirty = false;
       toast("已重置为该提供商当前模型", "info");
     });
     el("modelsBody").addEventListener("click", async function (e) {
@@ -1259,10 +1865,22 @@
       var tr = btn.closest("tr[data-i]");
       if (!tr) return;
       var i = parseInt(tr.getAttribute("data-i"), 10);
-      var name = modelsData[i] && modelsData[i].name;
-      if (name && !(await confirmDialog("确认删除模型「" + name + "」？（未保存前不生效）", "删除模型"))) return;
+      var name = (modelsData[i] && modelsData[i].name) || "";
+      if (name && !(await confirmDialog("确认删除模型「" + name + "」？（保存后生效）", "删除模型"))) return;
+      syncModelsDataFromDOM();
       modelsData.splice(i, 1);
       renderModels();
+      markProviderDirty();
+    });
+    el("modelsBody").addEventListener("input", markProviderDirty);
+    el("modelsBody").addEventListener("change", markProviderDirty);
+    ["pdName", "pdApiKey", "pdBaseUrl", "pdUserUrl"].forEach(function (id) {
+      var elem = el(id);
+      if (elem) elem.addEventListener("input", markProviderDirty);
+    });
+    ["pdEnabled", "pdReverseProxy"].forEach(function (id) {
+      var elem = el(id);
+      if (elem) elem.addEventListener("change", markProviderDirty);
     });
 
     /* 添加/编辑提供商弹层 */
@@ -1336,7 +1954,8 @@
       var card = e.target.closest(".log-card");
       if (!card) return;
       var ts = card.getAttribute("data-ts");
-      if (e.target.closest('[data-act="view"]')) viewLogDetail(ts);
+      if (e.target.closest('[data-act="load-wb"]')) loadLogToWorkbench(ts);
+      else if (e.target.closest('[data-act="view"]')) viewLogDetail(ts);
       else if (e.target.closest('[data-act="del"]')) {
         if (await confirmDialog("确认删除该条生图记录？", "删除记录")) deleteLog(ts);
       }
@@ -1348,6 +1967,117 @@
 
     /* 设置 */
     el("btnConfigSave").addEventListener("click", saveConfig);
+    el("btnPromptPresetSave").addEventListener("click", savePromptPresets);
+
+    /* 设置页面顶部分栏 Tab 切换 */
+    document.querySelectorAll(".sub-tab-btn[data-cfgtab]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        switchConfigTab(btn.getAttribute("data-cfgtab"));
+      });
+    });
+
+    /* 预设页面子 Tab 切换 */
+    document.querySelectorAll(".sub-tab-btn[data-subtab]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        switchPresetSubTab(btn.getAttribute("data-subtab"));
+      });
+    });
+
+    /* 画师预设导入 / 导出 / 夺舍 */
+    el("btnArtistExport").addEventListener("click", exportArtistPresets);
+    el("btnArtistImport").addEventListener("click", openArtistImportModal);
+    el("artistImportClose").addEventListener("click", function () { closeModal("artistImportModal"); });
+    el("artistImportCancel").addEventListener("click", function () { closeModal("artistImportModal"); });
+    el("artistImportConfirm").addEventListener("click", doImportArtistPresets);
+    el("btnNaiBrushTakeover").addEventListener("click", takeoverNaiBrush);
+    el("btnChooseImportFile").addEventListener("click", function () {
+      el("artistImportFileInput").click();
+    });
+    el("artistImportFileInput").addEventListener("change", function (e) {
+      var file = e.target.files && e.target.files[0];
+      if (!file) return;
+      el("importFileTip").textContent = file.name;
+      var reader = new FileReader();
+      reader.onload = function (evt) {
+        el("artistImportText").value = evt.target.result;
+      };
+      reader.readAsText(file, "UTF-8");
+    });
+
+    /* 生图测试台 (Workbench Studio) */
+    el("wbModel").addEventListener("change", function () {
+      onWbModelChange(this.value);
+    });
+    el("wbPresetSelect").addEventListener("change", function () {
+      var pName = this.value;
+      if (!pName) return;
+      var target = artistPresetsData.find(function (p) { return p.name === pName; });
+      if (target) {
+        var curPrompt = el("wbPrompt").value.trim();
+        var addText = target.artists;
+        if (curPrompt) {
+          el("wbPrompt").value = curPrompt + ", " + addText;
+        } else {
+          el("wbPrompt").value = addText;
+        }
+        if (target.negative) {
+          var curNeg = el("wbNegative").value.trim();
+          if (curNeg) {
+            el("wbNegative").value = curNeg + ", " + target.negative;
+          } else {
+            el("wbNegative").value = target.negative;
+          }
+        }
+        toast("已追加预设「" + pName + "」的画师串与负面词", "info");
+      }
+      this.value = "";
+    });
+
+    // 滑块联动展示
+    el("wbNaiSteps").addEventListener("input", function () { el("wbNaiStepsVal").textContent = this.value; });
+    el("wbNaiScale").addEventListener("input", function () { el("wbNaiScaleVal").textContent = parseFloat(this.value).toFixed(1); });
+    el("wbGeminiTemp").addEventListener("input", function () { el("wbGeminiTempVal").textContent = parseFloat(this.value).toFixed(2); });
+    el("wbOpenaiTemp").addEventListener("input", function () { el("wbOpenaiTempVal").textContent = parseFloat(this.value).toFixed(2); });
+
+    // 参考图选择与上传
+    el("wbRefDropzone").addEventListener("click", function () { el("wbRefFileInput").click(); });
+    el("wbRefFileInput").addEventListener("change", function (e) {
+      var file = e.target.files && e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function (evt) {
+        wbRefImageBase64 = evt.target.result;
+        el("wbRefImg").src = wbRefImageBase64;
+        el("wbRefFileName").textContent = file.name;
+        el("wbRefFileSize").textContent = Math.round(file.size / 1024) + " KB";
+        el("wbRefEmptyView").hidden = true;
+        el("wbRefPreviewView").hidden = false;
+        el("btnWbClearRef").hidden = false;
+        toast("参考图片已载入（图生图模式）", "info");
+      };
+      reader.readAsDataURL(file);
+    });
+    el("btnWbClearRef").addEventListener("click", function (e) {
+      e.stopPropagation();
+      clearWbRefImage();
+      toast("已清除参考图", "info");
+    });
+
+    // 生成与重置
+    el("btnWbGenerate").addEventListener("click", doWorkbenchGenerate);
+    el("btnWbReset").addEventListener("click", resetWbForm);
+    el("btnWbDownload").addEventListener("click", downloadWbImage);
+    el("btnWbViewLarge").addEventListener("click", function () {
+      if (!wbLastResult || !wbLastResult.image_base64) return;
+      openModal("viewModal");
+      el("viewImageWrap").hidden = false;
+      el("viewImage").src = wbLastResult.image_base64;
+      el("viewPlaceholder").hidden = true;
+      el("viewDetail").innerHTML =
+        '<div class="dl-item"><span class="dl-k">模型</span><span class="dl-v">' + esc(wbLastResult.model || "-") + "</span></div>" +
+        '<div class="dl-item"><span class="dl-k">耗时</span><span class="dl-v">' + esc(wbLastResult.elapsed + "s") + "</span></div>" +
+        '<div class="dl-item"><span class="dl-k">提示词</span><span class="dl-v">' + esc(el("wbPrompt").value) + "</span></div>";
+    });
 
     /* 画师预设 */
     el("btnArtistPresetsAdd").addEventListener("click", function () {
@@ -1394,7 +2124,8 @@
         if (!el("viewModal").hidden) closeModal("viewModal");
       }
     });
-    ["providerModal", "rechargeModal", "viewModal"].forEach(function (id) {
+    // 提供商表单可能包含未保存的 API Key 和模型配置，点击遮罩时不自动关闭。
+    ["rechargeModal", "viewModal"].forEach(function (id) {
       el(id).addEventListener("click", function (e) {
         if (e.target === el(id)) closeModal(id);
       });

@@ -980,3 +980,172 @@ html[data-theme="dark"] .type-novalai { --type-c: #a78bfa; --type-bg: rgba(167, 
   .log-actions { flex-direction: column; }
   .form-grid { grid-template-columns: 1fr; }
 }
+
+
+/* ============ 8.5 顶部分栏与子 Tab (设计规范: 现代玻璃感 / 胶囊分段器) ============ */
+.tab-header-card {
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-radius: var(--r-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.sub-tabs-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.sub-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2nd);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 150ms ease-out, color 150ms ease-out,
+    border-color 150ms ease-out, transform 150ms ease-out;
+}
+.sub-tab-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.8;
+}
+.sub-tab-btn:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+  border-color: var(--border);
+}
+.sub-tab-btn:active {
+  transform: scale(0.98);
+}
+.sub-tab-btn.is-active {
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.sub-tab-btn.is-active svg {
+  opacity: 1;
+}
+
+/* 字段错误高亮与微交互 */
+.input.is-invalid {
+  border-color: var(--danger) !important;
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg-surface)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent) !important;
+  animation: shake 300ms ease-in-out;
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+
+/* 响应式调整 */
+@media (max-width: 600px) {
+  .sub-tabs-bar {
+    gap: 4px;
+  }
+  .sub-tab-btn {
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+    padding: 8px 6px;
+    font-size: 12px;
+  }
+}
+
+/* ============================================================
+ * 14. 生图测试台 (Workbench Studio)
+ * ============================================================ */
+.workbench-layout {
+  display: grid;
+  grid-template-columns: minmax(380px, 480px) 1fr;
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 960px) {
+  .workbench-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.workbench-left {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.workbench-right {
+  position: sticky;
+  top: 16px;
+}
+
+.workbench-canvas {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-sunken);
+  border-radius: var(--r-md);
+  border: 1px dashed var(--border);
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  min-height: 440px;
+}
+
+.wb-empty, .wb-loading {
+  text-align: center;
+  padding: 30px 16px;
+}
+
+.wb-result-view {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wb-img-container {
+  max-width: 100%;
+  max-height: 520px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.wb-img-container img {
+  max-width: 100%;
+  max-height: 520px;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  object-fit: contain;
+  cursor: zoom-in;
+  transition: transform 150ms ease-out;
+}
+.wb-img-container img:hover {
+  transform: scale(1.01);
+}
+
+.slider {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  outline: none;
+  cursor: pointer;
+  accent-color: var(--accent);
+}

@@ -27,22 +27,33 @@ async def load_json(path) -> Any:
 
 
 def _atomic_write(path, json_data: str) -> None:
-    """原子写：先写同目录临时文件（<path>.tmp）再 os.replace（同文件系统原子替换）。
+    """原子写：在目标同目录下生成唯一临时文件写入，再通过 os.replace 原子替换。
 
-    避免进程崩溃/断电导致 JSON 文件半写损坏；临时文件与目标同目录保证同文件系统。
+    采用 NamedTemporaryFile 保证高并发写入时临时文件名唯一，彻底避免固定文件名导致的写竞态截断。
     """
-    tmp_path = path.with_name(path.name + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json_data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
+    dir_path = path.parent
+    dir_path.mkdir(parents=True, exist_ok=True)
+    tmp_name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=dir_path, delete=False, encoding="utf-8") as tf:
+            tf.write(json_data)
+            tf.flush()
+            os.fsync(tf.fileno())
+            tmp_name = tf.name
+        os.replace(tmp_name, path)
+    except Exception:
+        if tmp_name and os.path.exists(tmp_name):
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+        raise
 
 
 async def save_json(path, data) -> None:
     """写入 JSON 文件（ensure_ascii=False, indent=4），使用 run_in_executor 不阻塞事件循环。
 
-    采用原子写（临时文件 + os.replace），防止并发/崩溃导致文件损坏。
+    采用原子写（唯一临时文件 + os.replace），防止并发/崩溃导致文件损坏。
     """
     loop = asyncio.get_running_loop()
     try:
@@ -51,3 +62,4 @@ async def save_json(path, data) -> None:
         await loop.run_in_executor(None, _atomic_write, path, json_data)
     except Exception as e:
         logger.error(f"写入 JSON 文件失败 ({path}): {e}", exc_info=True)
+        raise
