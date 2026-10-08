@@ -1381,6 +1381,7 @@
     tagger_provider_id: "tab-enhancement", tagger_temperature: "tab-enhancement", tagger_max_tokens: "tab-enhancement",
     artist_recommend_enabled: "tab-enhancement", artist_recommend_max_candidates: "tab-enhancement", artist_recommend_min_match: "tab-enhancement",
     selfie_prompt: "tab-enhancement",
+    enable_llm_tool_system_prompt: "tab-enhancement", custom_llm_tool_system_prompt: "tab-enhancement",
     // 基础设定
     prefix: "tab-base", extra_prefix: "tab-base", use_proxy: "tab-base", proxy_url: "tab-base",
     download_timeout: "tab-base", download_retries: "tab-base", api_timeout: "tab-base",
@@ -1403,6 +1404,7 @@
     tagger_provider_id: "cfgTaggerProvider", tagger_temperature: "cfgTaggerTemp", tagger_max_tokens: "cfgTaggerMaxTokens",
     artist_recommend_enabled: "cfgArtistRecEnabled", artist_recommend_max_candidates: "cfgArtistRecMax", artist_recommend_min_match: "cfgArtistRecMin",
     selfie_prompt: "cfgSelfiePrompt",
+    enable_llm_tool_system_prompt: "cfgEnableLlmToolSystemPrompt", custom_llm_tool_system_prompt: "cfgCustomLlmToolSystemPrompt",
     prefix: "cfgPrefix", extra_prefix: "cfgExtraPrefix", use_proxy: "cfgUseProxy", proxy_url: "cfgProxyUrl",
     download_timeout: "cfgDownloadTimeout", download_retries: "cfgDownloadRetries", api_timeout: "cfgApiTimeout",
     enable_user_limit: "cfgEnableUser", enable_group_limit: "cfgEnableGroup", user_count_cap: "cfgUserCap", group_task_limit: "cfgTaskLimit",
@@ -1517,8 +1519,10 @@
       el("cfgArtistRecEnabled").checked = !!c.artist_recommend_enabled;
       el("cfgArtistRecMax").value = c.artist_recommend_max_candidates != null ? c.artist_recommend_max_candidates : "";
       el("cfgArtistRecMin").value = c.artist_recommend_min_match != null ? c.artist_recommend_min_match : "";
-      /* 自拍特征 */
+      /* 自拍特征与系统提示词注入 */
       el("cfgSelfiePrompt").value = c.selfie_prompt || "";
+      if (el("cfgEnableLlmToolSystemPrompt")) el("cfgEnableLlmToolSystemPrompt").checked = c.enable_llm_tool_system_prompt !== false;
+      if (el("cfgCustomLlmToolSystemPrompt")) el("cfgCustomLlmToolSystemPrompt").value = c.custom_llm_tool_system_prompt || "";
       /* 权限 */
       el("cfgUserWhite").value = (c.user_whitelist || []).join("\n");
       el("cfgUserBlack").value = (c.user_blacklist || []).join("\n");
@@ -1691,8 +1695,10 @@
       artist_recommend_enabled: el("cfgArtistRecEnabled").checked,
       artist_recommend_max_candidates: parseInt(el("cfgArtistRecMax").value, 10) || 0,
       artist_recommend_min_match: parseInt(el("cfgArtistRecMin").value, 10) || 0,
-      /* 自拍特征 */
+      /* 自拍特征与系统提示词注入 */
       selfie_prompt: el("cfgSelfiePrompt").value,
+      enable_llm_tool_system_prompt: el("cfgEnableLlmToolSystemPrompt") ? el("cfgEnableLlmToolSystemPrompt").checked : true,
+      custom_llm_tool_system_prompt: el("cfgCustomLlmToolSystemPrompt") ? el("cfgCustomLlmToolSystemPrompt").value : "",
       /* 权限 */
       user_whitelist: splitLines(el("cfgUserWhite").value),
       user_blacklist: splitLines(el("cfgUserBlack").value),

@@ -776,6 +776,26 @@
                   </label>
                 </div>
               </div>
+
+              <!-- LLM 工具提示词注入 -->
+              <div class="card" id="card-llm-injection">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">生图工具系统提示词注入</h3>
+                    <p class="card-desc">自动向对话主 LLM 注入生图函数工具的详细说明、扩写要求与禁止拒答指令。</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field field-row" data-field="enable_llm_tool_system_prompt">
+                    <span class="field-label">启用系统提示词自动注入<i class="field-hint">强烈推荐开启。在主模型接收对话时注入工具指引，大幅提升主动出图率</i></span>
+                    <input type="checkbox" id="cfgEnableLlmToolSystemPrompt" class="switch">
+                  </label>
+                  <label class="field" data-field="custom_llm_tool_system_prompt">
+                    <span class="field-label">自定义注入的提示词说明（可留空）<i class="field-hint">留空则使用内置的高质量扩写生图指引。在此输入可完全覆盖默认规则</i></span>
+                    <textarea id="cfgCustomLlmToolSystemPrompt" class="input textarea" rows="4" placeholder="留空使用默认的高质量扩写生图指引..."></textarea>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 

@@ -271,6 +271,29 @@ ARTIST_FROM_POOL_TEMPLATE = """你是 NovelAI 画师串专家。只能使用下�
 - 直接输出最终画师串，不要解释
 """
 
+# ========== 生图函数工具系统提示词说明（注入到主 LLM 请求，提升工具命中率与扩写质量） ==========
+DEFAULT_LLM_TOOL_SYSTEM_PROMPT = """# AI 绘画与生图工具能力指引 (Image Generation Capabilities)
+你具备强大的 AI 绘画与图像生成能力，系统为你配备了专业的生图函数工具：
+
+1. 【严格禁止拒绝生图】：
+   - 当用户表达「画一张...」、「生成图片」、「画个...」、「来张...」、「画你自己/自拍」等绘画需求时，严禁回复「我只是文本模型，无法生成图片」！
+   - 你必须直接调用 `generate_image` 函数工具为用户执行生图！
+
+2. 【提示词自动高质量扩写要求】：
+   - 调用 `generate_image(prompt=...)` 时，必须将用户的简短中文需求扩写为详细、高质量、适合 AI 绘画的完整英文提示词（prompt）。
+   - 包含要素：画面主体、角色特征、服装发型、环境背景、光影氛围、视角构图、画质标签（如 masterpiece, highly detailed, photorealistic 或 anime aesthetic 等）。
+
+3. 【AI 助手自拍与形象一致性】：
+   - 当用户要求画「你（AI 助手自己）」的自拍、形象或生活照时，请将参数 `selfie=true`，系统会自动在提示词前追加你的预设外貌特征。
+
+4. 【图+文生图能力】：
+   - 若用户在当前消息中附带了图片并要求以此图画图、手办化或改变画风，`generate_image` 会自动提取图片作为参考进行图生图。
+
+5. 【辅助查询工具】：
+   - 用户询问「我还能画几次图」或「生图配额」时，调用 `query_generation_quota` 查询；
+   - 用户询问「有哪些生图模型可以用」时，调用 `query_generation_models` 查询；
+   - 用户询问「有哪些画风预设」时，调用 `query_presets` 查询。"""
+
 # ========== 各提供商类型的默认模型模板（添加提供商时自动填充，可再编辑） ==========
 # novalai 列表来自反代 std.loliyc.com 的 /v1/models 实测（2026-08-30）
 PROVIDER_DEFAULT_MODELS: Dict[str, List[Dict[str, Any]]] = {
@@ -3047,6 +3070,29 @@ class FigurineProPlugin(Star):
             presets = list(self.prompt_map.keys())
             return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
 
+    def _get_llm_tool_system_prompt(self) -> str:
+        """获取注入到系统提示词中的生图函数工具说明。支持用户自定义覆盖。"""
+        custom = str(self.conf.get("custom_llm_tool_system_prompt", "") or "").strip()
+        if custom:
+            return custom
+        return DEFAULT_LLM_TOOL_SYSTEM_PROMPT.strip()
+
+    if hasattr(filter, "on_llm_request"):
+        @filter.on_llm_request()
+        async def on_llm_request_inject_prompt(self, event: AstrMessageEvent, req: Any) -> None:
+            """在向主对话 LLM 发起请求时，自动在系统提示词末尾注入生图函数工具的详细说明与扩写指引。"""
+            if not bool(self.conf.get("enable_llm_tool_system_prompt", True)):
+                return
+            # 只有当插件启用时才注入
+            instruction = self._get_llm_tool_system_prompt()
+            if not instruction:
+                return
+            current_prompt = getattr(req, "system_prompt", None)
+            if current_prompt is None:
+                req.system_prompt = instruction
+            elif instruction not in current_prompt:
+                req.system_prompt = f"{current_prompt}\n\n{instruction}\n"
+
     async def _notify_llm_result(self, event: AstrMessageEvent, text: str) -> None:
         """后台生图完成后，把「结果文本」主动回传当前会话，供主 LLM 下一轮回应/引用。
 
@@ -4209,6 +4255,9 @@ class FigurineProPlugin(Star):
         "nsfw_filter_tags": str,
         # NSFW 加密（LLM 工具 nsfw=true 走加密 ZIP 发送的双层开关）
         "nsfw_zip_enabled": bool,
+        # LLM 工具系统提示词注入
+        "enable_llm_tool_system_prompt": bool,
+        "custom_llm_tool_system_prompt": str,
     }
 
     def _register_web_apis(self) -> None:
@@ -5099,6 +5148,9 @@ class FigurineProPlugin(Star):
                 "nsfw_filter_tags": str(self.conf.get("nsfw_filter_tags", "") or ""),
                 # NSFW 加密
                 "nsfw_zip_enabled": bool(self.conf.get("nsfw_zip_enabled", True)),
+                # LLM 工具系统提示词注入
+                "enable_llm_tool_system_prompt": bool(self.conf.get("enable_llm_tool_system_prompt", True)),
+                "custom_llm_tool_system_prompt": str(self.conf.get("custom_llm_tool_system_prompt", "") or ""),
             })
         except Exception as e:
             return error_response(str(e))
@@ -5143,7 +5195,9 @@ class FigurineProPlugin(Star):
                 "group_task_limit": "群并发生成任务数", "enable_checkin": "开启每日签到",
                 "checkin_fixed_reward": "签到固定奖励次数", "enable_random_checkin": "启用随机奖励",
                 "checkin_random_reward_min": "随机奖励下限", "checkin_random_reward_max": "随机奖励上限",
-                "help_menu": "帮助菜单", "prompt_list": "预设 prompt"
+                "help_menu": "帮助菜单", "prompt_list": "预设 prompt",
+                "enable_llm_tool_system_prompt": "启用生图工具系统提示词注入",
+                "custom_llm_tool_system_prompt": "自定义生图工具系统提示词",
             }
             # AstrBotConfig(dict) 无 set 方法：先收集更新项，最后一次性原子落盘（避免多次写盘）
             config_updates: Dict[str, Any] = {}

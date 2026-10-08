@@ -417,5 +417,17 @@
     "type": "string",
     "hint": "前置到负面词开头的过滤标签，默认 {{{{nsfw}}}}。留空使用默认值。",
     "default": ""
+  },
+  "enable_llm_tool_system_prompt": {
+    "description": "【LLM工具】自动在系统提示词注入生图工具说明与用处",
+    "type": "bool",
+    "hint": "推荐开启。当主大模型收到对话时，自动在 system_prompt 末尾注入生图函数工具的详细用处、扩写规则与禁止拒答指令，大幅提高大模型的主动出图率。",
+    "default": true
+  },
+  "custom_llm_tool_system_prompt": {
+    "description": "【LLM工具】自定义生图工具系统提示词说明（留空用默认）",
+    "type": "text",
+    "hint": "留空则使用内置的高质量扩写生图说明。可在此输入自定义的指导提示词以覆盖默认规则。",
+    "default": ""
   }
 }
