@@ -2724,7 +2724,7 @@ class FigurineProPlugin(Star):
 
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
-        async def generate_image(self, event: AstrMessageEvent, prompt: str, model: str = "",
+        async def generate_image(self, event: AstrMessageEvent, prompt: str = "", model: str = "",
                                  params: Optional[Dict] = None, selfie: bool = False,
                                  nsfw: bool = False):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
@@ -2739,6 +2739,15 @@ class FigurineProPlugin(Star):
                 selfie(boolean): 自拍模式。用户要求画「你（AI 自己）」的自拍/形象时为 true（自动在提示词前追加自拍人物外貌特征），其他情况默认 false
                 nsfw(boolean): NSFW 加密模式。用户要求生成 NSFW/成人内容时为 true，生图结果会打包成密码加密 ZIP 发送（解压密码 nsfwmiaomiao），默认 false
             """
+            prompt = (prompt or "").strip()
+            if not prompt:
+                # 容错：如果模型漏传 prompt，尝试从用户原始文本中提取或返回明确说明
+                raw_text = event.message_str.strip()
+                clean_text = re.sub(r'^(帮我|请|给我)?(画|生成|绘制|画一张|画个|来张)', '', raw_text).strip()
+                if clean_text:
+                    prompt = clean_text
+                else:
+                    return "生图失败：未提供绘画提示词 (prompt 不能为空)，请补充具体的绘画描述。"
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
             # 注意：llm_tool 工具是纯协程（函数体内不能有 yield），发消息给用户用 event.send，return 文本回传 LLM
