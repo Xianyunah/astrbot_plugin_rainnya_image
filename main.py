@@ -42,7 +42,8 @@ PARAM_SCHEMA = {
     "negative_prompt":  {"type": "str",   "max_len": 500},
 }
 
-# 各参数校验失败时的错误文案模板
+# 哨兵对象：用于「智力矫正」模式下精确判断大模型是否显式传递了各参数
+_PARAM_NOT_SET = object()
 _PARAM_ERROR_MSGS = {
     "size": "参数 size 取值无效，可选：portrait_small/portrait_medium/portrait_large/landscape_small/landscape_medium/landscape_large/square（及旧 1K/2K/4K）",
     "temperature": "参数 temperature 超出范围（0.0-2.0）",
@@ -2747,30 +2748,71 @@ class FigurineProPlugin(Star):
 
     if hasattr(filter, "llm_tool"):
         @filter.llm_tool(name="generate_image")
-        async def generate_image(self, event: AstrMessageEvent, prompt: str = "", model: str = "",
-                                 params: Optional[Dict] = None, selfie: bool = False,
-                                 nsfw: bool = False):
+        async def generate_image(self, event: AstrMessageEvent, prompt: str = "", model: Any = _PARAM_NOT_SET,
+                                 params: Any = _PARAM_NOT_SET, selfie: Any = _PARAM_NOT_SET,
+                                 nsfw: Any = _PARAM_NOT_SET):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
 
             注意：若用户在当前消息（或引用/刚发送的消息）中附带图片，本工具会自动提取该图片作为参考进行「图+文生图」；若纯文本描述则进行「文生图」。
             注意：若用户要求绘制「你（AI 自己）」的自拍或形象（例如「画你自己」「你的自拍」「画你的样子」等），请将 selfie 参数设为 true，本工具会自动在提示词前追加预设的 AI 人物外貌特征（发色/瞳色/气质等），使形象保持一致。
 
             Args:
-                prompt(string): 经扩写完善的完整绘画提示词（英文，包含主体、风格、构图、光线、细节等）
-                model(string): 生图模型名（可留空，留空则用当前会话所在群的默认模型；若不确定可用模型请先调用 query_generation_models 工具查询）
-                params(object): 生图参数（可选，JSON对象，如 {"size":"4K","temperature":0.9}；可用键：size/temperature/max_tokens/steps/negative_prompt）
-                selfie(boolean): 自拍模式。用户要求画「你（AI 自己）」的自拍/形象时为 true（自动在提示词前追加自拍人物外貌特征），其他情况默认 false
-                nsfw(boolean): NSFW 加密模式。用户要求生成 NSFW/成人内容时为 true，生图结果会打包成密码加密 ZIP 发送（解压密码 nsfwmiaomiao），默认 false
+                prompt(string): 经扩写完善的完整绘画提示词（必须为纯英文Tag，包含主体、风格、构图、光线、细节等）
+                model(string): 生图模型名
+                params(object): 生图参数对象（包含生成尺寸size、步数steps、CFG引导强度scale/温度、负面词negative_prompt等）
+                selfie(boolean): 自拍模式布尔值，是否为画AI助手自身形象
+                nsfw(boolean): NSFW加密模式布尔值，是否为成人内容
             """
             prompt = (prompt or "").strip()
+            force_full = bool(self.conf.get("force_full_params", False))
+            force_en = bool(self.conf.get("force_english_tags", False))
+            reject_errors: List[str] = []
+
+            # 1. 强制英文 Tag 检测
+            if force_en:
+                if not prompt:
+                    reject_errors.append("prompt: 提示词不能为空")
+                elif re.search(r'[\u4e00-\u9fa5]', prompt):
+                    reject_errors.append("prompt: 检测到中文字符，AI 绘画必须使用纯英文 Tag，请将描述翻译扩写为英文提示词后重新调用")
+
+            # 2. 强制参数完整检测（智力矫正模式）
+            if force_full:
+                if not prompt and not force_en:
+                    reject_errors.append("prompt: 未提供绘画提示词")
+                if model is _PARAM_NOT_SET or not isinstance(model, str) or not model.strip():
+                    reject_errors.append("model: 未指定生图模型名（必须显式指定模型名，不知道请先调用 query_generation_models 查询）")
+                if params is _PARAM_NOT_SET or not isinstance(params, dict) or not params:
+                    reject_errors.append("params: 未提供生成参数对象（必须显式指定包含 size、steps、scale 等参数的对象）")
+                if selfie is _PARAM_NOT_SET or not isinstance(selfie, bool):
+                    reject_errors.append("selfie: 未指定自拍模式布尔值（必须显式传入 true 或 false）")
+                if nsfw is _PARAM_NOT_SET or not isinstance(nsfw, bool):
+                    reject_errors.append("nsfw: 未指定 NSFW 模式布尔值（必须显式传入 true 或 false）")
+
+            # 若有参数不合格，按模板严厉打回
+            if reject_errors:
+                template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                if not template:
+                    template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                err_text = "；\n- ".join(reject_errors)
+                reject_msg = template.replace("{errors}", f"\n- {err_text}")
+                logger.warning(f"[NewImage/智力矫正] 打回模型不合格调用:\n{reject_msg}")
+                return reject_msg
+
+            # 非强制模式下的缺省值回退
+            final_model_param = model if (model is not _PARAM_NOT_SET and isinstance(model, str)) else ""
+            final_params_param = params if (params is not _PARAM_NOT_SET and isinstance(params, dict)) else None
+            final_selfie_param = bool(selfie) if selfie is not _PARAM_NOT_SET else False
+            final_nsfw_param = bool(nsfw) if nsfw is not _PARAM_NOT_SET else False
+
             if not prompt:
-                # 容错：如果模型漏传 prompt，尝试从用户原始文本中提取或返回明确说明
+                # 容错：如果非强制模式下模型漏传 prompt，尝试从用户原始文本中提取
                 raw_text = event.message_str.strip()
                 clean_text = re.sub(r'^(帮我|请|给我)?(画|生成|绘制|画一张|画个|来张)', '', raw_text).strip()
                 if clean_text:
                     prompt = clean_text
                 else:
                     return "生图失败：未提供绘画提示词 (prompt 不能为空)，请补充具体的绘画描述。"
+
             # 次数限制与手动命令一致：管理员豁免、群组优先、成功才扣减
             # （工具由主对话 LLM 自主调用，不查黑白名单、不占群槽位）
             # 注意：llm_tool 工具是纯协程（函数体内不能有 yield），发消息给用户用 event.send，return 文本回传 LLM
@@ -2779,7 +2821,7 @@ class FigurineProPlugin(Star):
             # 尝试从用户当前消息中提取图片（引用回复链/直接 Image 组件），无图则纯文生图
             image_bytes_list = await self._extract_event_images(event)
             # 确定最终模型：用户指定 > 本群配置模型 > 手动配置默认模型 > conf.model 兜底
-            final_model = (model or "").strip()
+            final_model = final_model_param.strip()
             if not final_model:
                 final_model = self.group_models.get(group_id, "") if group_id else ""
             if not final_model and self.available_model_names:
@@ -2797,16 +2839,16 @@ class FigurineProPlugin(Star):
                         logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                     return f"未执行生图：该用户生图次数已用完（{err}），请勿让用户再请求生图。"
             # 自拍模式：在提示词前追加可配置的固定人物外貌特征（AI 画自己的自拍用，保证形象一致）
-            if selfie:
+            if final_selfie_param:
                 feature = str(self.conf.get("selfie_prompt", "") or "").strip()
                 if feature:
                     prompt = f"{feature}, {prompt}"
             # 异步生图：立即返回给 LLM（不阻塞其回复），实际生成放后台任务，完成后自动发送到会话
             # 对 LLM 传入的 params 做温和清洗（夹取/丢弃），再传入后台任务
-            cleaned_params, _ = self._sanitize_params(params, "LLM工具") if params else ({}, [])
+            cleaned_params, _ = self._sanitize_params(final_params_param, "LLM工具") if final_params_param else ({}, [])
             task = asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
                                                             params=cleaned_params,
-                                                            image_bytes_list=image_bytes_list, nsfw=nsfw))
+                                                            image_bytes_list=image_bytes_list, nsfw=final_nsfw_param))
             # 保存后台任务引用（防 GC），结束后自动从集合移除；terminate 时统一回收
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
@@ -2889,13 +2931,20 @@ class FigurineProPlugin(Star):
                     await self._release_group_slot(group_id)
 
         @filter.llm_tool(name="query_generation_quota")
-        async def query_generation_quota(self, event: AstrMessageEvent, user_id: str = ""):
+        async def query_generation_quota(self, event: AstrMessageEvent, user_id: Any = _PARAM_NOT_SET):
             """查询用户的生图次数配额（个人剩余次数与当前群剩余次数）。注意本工具不执行生图，仅查询。
 
             Args:
-                user_id(string): 要查询的QQ号，留空则查当前对话用户
+                user_id(string): 要查询的QQ号，查自己可填当前用户QQ或空串
             """
-            target = user_id.strip() if (user_id and user_id.strip()) else event.get_sender_id()
+            force_full = bool(self.conf.get("force_full_params", False))
+            if force_full and user_id is _PARAM_NOT_SET:
+                template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                if not template:
+                    template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                return template.replace("{errors}", "\n- user_id: 必须显式指定要查询的 QQ 号或当前用户 QQ")
+            target_str = str(user_id or "").strip() if (user_id is not _PARAM_NOT_SET and user_id) else event.get_sender_id()
+            target = target_str if target_str else event.get_sender_id()
             if self._is_admin_id(target):
                 personal_display = "∞（管理员豁免）"
             else:
@@ -2926,45 +2975,59 @@ class FigurineProPlugin(Star):
             return "可用生图模型：\n" + "\n".join(lines)
 
         @filter.llm_tool(name="query_generation_history")
-        async def query_generation_history(self, event: AstrMessageEvent, scope: str = "本群", days: int = 0,
-                                           limit: int = 10):
+        async def query_generation_history(self, event: AstrMessageEvent, scope: Any = _PARAM_NOT_SET,
+                                           days: Any = _PARAM_NOT_SET, limit: Any = _PARAM_NOT_SET):
             """查询生图历史记录（每条包含时间戳、群号、提示词摘要、文件路径）。可用于回复用户「之前生过什么图」等。本工具不执行生图，仅查询。
 
             Args:
-                scope(string): 查询范围，本群 或 全局，默认本群
-                days(number): 最近多少天内的记录，可选，默认不限
-                limit(number): 最多返回条数，默认 10，最大 20
+                scope(string): 查询范围（本群 或 全局）
+                days(number): 最近多少天内的记录（0为不限天数）
+                limit(number): 最多返回条数（最大20条）
             """
-            scope_val = (scope or "").strip() or "本群"
+            force_full = bool(self.conf.get("force_full_params", False))
+            if force_full:
+                errors = []
+                if scope is _PARAM_NOT_SET or not scope:
+                    errors.append("scope: 未指定查询范围（必须为 本群 或 全局）")
+                if days is _PARAM_NOT_SET:
+                    errors.append("days: 未指定查询天数数字（0为不限天数）")
+                if limit is _PARAM_NOT_SET:
+                    errors.append("limit: 未指定返回条数数字")
+                if errors:
+                    template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                    if not template:
+                        template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                    return template.replace("{errors}", "\n- " + "\n- ".join(errors))
+
+            scope_val = str(scope or "本群").strip() if scope is not _PARAM_NOT_SET else "本群"
             try:
-                limit = max(1, min(int(limit) if limit else 10, LOG_QUERY_LIMIT_MAX))
+                limit_int = int(limit) if (limit is not _PARAM_NOT_SET and limit is not None) else 10
+                limit_val = max(1, min(limit_int, LOG_QUERY_LIMIT_MAX))
             except (TypeError, ValueError):
-                limit = 10
+                limit_val = 10
             records = list(self.generation_history)
-            # 时间倒序（最新在前）：generation_history 为 append 顺序，最新在末尾
             records = list(reversed(records))
-            # 范围过滤：默认本群（event.get_group_id() 为空则退化为全局）
             if scope_val != "全局":
                 group_id = event.get_group_id()
                 if group_id:
                     records = [r for r in records if str(r.get("group_id", "")) == str(group_id)]
-            # days 过滤：可选，按时间戳字符串解析比较
-            if days:
+            days_int = 0
+            if days is not _PARAM_NOT_SET and days is not None:
                 try:
-                    days = max(1, int(days))
+                    days_int = max(0, int(days))
                 except (TypeError, ValueError):
-                    days = 0
-                if days:
-                    cutoff = datetime.now() - timedelta(days=days)
-                    filtered = []
-                    for r in records:
-                        try:
-                            if datetime.strptime(str(r.get("timestamp", "")), "%Y%m%d_%H%M%S_%f") >= cutoff:
-                                filtered.append(r)
-                        except ValueError:
-                            continue
-                    records = filtered
-            records = records[:limit]
+                    days_int = 0
+            if days_int:
+                cutoff = datetime.now() - timedelta(days=days_int)
+                filtered = []
+                for r in records:
+                    try:
+                        if datetime.strptime(str(r.get("timestamp", "")), "%Y%m%d_%H%M%S_%f") >= cutoff:
+                            filtered.append(r)
+                    except ValueError:
+                        continue
+                records = filtered
+            records = records[:limit_val]
             if not records:
                 return "暂无生图记录"
             lines = []
@@ -2975,14 +3038,20 @@ class FigurineProPlugin(Star):
             return "生图记录如下：\n" + "\n".join(lines)
 
         @filter.llm_tool(name="query_generation_image")
-        async def query_generation_image(self, event: AstrMessageEvent, file_path: str = ""):
+        async def query_generation_image(self, event: AstrMessageEvent, file_path: Any = _PARAM_NOT_SET):
             """查询生图历史记录对应的原图，并将图片直接发送给用户。用户问「之前生成的那张图」「历史图片」等时可调用。本工具不执行生图，仅查询并发送图片。
 
             Args:
-                file_path(string): 生图记录中的图片文件路径（来自 query_generation_history 返回的 file_path 字段）
+                file_path(string): 生图记录中的图片文件路径
             """
-            # 校验 file_path 在 generations 目录内（防路径穿越），读取并转 base64 data URL 发送
-            resolved, _, err_reason = self._resolve_generation_file(file_path)
+            force_full = bool(self.conf.get("force_full_params", False))
+            if force_full and (file_path is _PARAM_NOT_SET or not file_path or not str(file_path).strip()):
+                template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                if not template:
+                    template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                return template.replace("{errors}", "\n- file_path: 未指定图片文件路径（必须从 query_generation_history 结果中提取）")
+            file_path_str = str(file_path or "").strip() if file_path is not _PARAM_NOT_SET else ""
+            resolved, _, err_reason = self._resolve_generation_file(file_path_str)
             if not resolved:
                 try:
                     await event.send(MessageChain(chain=[Plain(f"未找到该历史图片：{err_reason}")]))
@@ -3007,26 +3076,38 @@ class FigurineProPlugin(Star):
             return "已将历史图片发送给用户。"
 
         @filter.llm_tool(name="query_generation_stats")
-        async def query_generation_stats(self, event: AstrMessageEvent, scope: str = "本群", days: int = 7):
-            """统计生图使用情况：总张数、按模型分组、按用户分组（Top）。用户问「最近生成了多少图」「使用统计」等时可调用。本工具不执行生图，仅统计。
+        async def query_generation_stats(self, event: AstrMessageEvent, scope: Any = _PARAM_NOT_SET,
+                                         days: Any = _PARAM_NOT_SET):
+            """统计生图使用情况：总张数、按模型分组、按用户分组。用户问「最近生成了多少图」「使用统计」等时可调用。本工具不执行生图，仅统计。
 
             Args:
-                scope(string): 统计范围，本群 或 全局，默认本群
-                days(number): 最近多少天，默认 7
+                scope(string): 统计范围（本群 或 全局）
+                days(number): 最近多少天
             """
-            scope_val = (scope or "").strip() or "本群"
+            force_full = bool(self.conf.get("force_full_params", False))
+            if force_full:
+                errors = []
+                if scope is _PARAM_NOT_SET or not scope:
+                    errors.append("scope: 未指定统计范围（必须为 本群 或 全局）")
+                if days is _PARAM_NOT_SET:
+                    errors.append("days: 未指定统计天数数字")
+                if errors:
+                    template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                    if not template:
+                        template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                    return template.replace("{errors}", "\n- " + "\n- ".join(errors))
+
+            scope_val = str(scope or "本群").strip() if scope is not _PARAM_NOT_SET else "本群"
             try:
-                days = max(1, int(days))
+                days_val = max(1, int(days)) if (days is not _PARAM_NOT_SET and days is not None) else 7
             except (TypeError, ValueError):
-                days = 7
+                days_val = 7
             records = list(self.generation_history)
-            # 范围过滤：本群按当前会话群匹配；全局全部（本群且无群上下文时退化为全局）
             if scope_val != "全局":
                 group_id = event.get_group_id()
                 if group_id:
                     records = [r for r in records if str(r.get("group_id", "")) == str(group_id)]
-            # days 过滤：按时间戳 %Y%m%d_%H%M%S_%f 解析比较
-            cutoff = datetime.now() - timedelta(days=days)
+            cutoff = datetime.now() - timedelta(days=days_val)
             filtered = []
             for r in records:
                 try:
@@ -3040,29 +3121,35 @@ class FigurineProPlugin(Star):
             by_model: Dict[str, int] = {}
             by_user: Dict[str, int] = {}
             for r in filtered:
-                model = str(r.get("model", "") or "未知")
-                by_model[model] = by_model.get(model, 0) + 1
-                user = str(r.get("user_id", "") or "未知")
-                by_user[user] = by_user.get(user, 0) + 1
-            # 按数量降序
+                model_n = str(r.get("model", "") or "未知")
+                by_model[model_n] = by_model.get(model_n, 0) + 1
+                user_id_val = str(r.get("user_id", "") or "未知")
+                by_user[user_id_val] = by_user.get(user_id_val, 0) + 1
             model_parts = [f"{m} {c}张" for m, c in sorted(by_model.items(), key=lambda x: -x[1])]
             user_parts = [f"{u} {c}张" for u, c in sorted(by_user.items(), key=lambda x: -x[1])[:5]]
             scope_txt = "全局" if scope_val == "全局" else "本群"
-            return (f"近 {days} 天（{scope_txt}）共生成 {total} 张图片。\n"
+            return (f"近 {days_val} 天（{scope_txt}）共生成 {total} 张图片。\n"
                     f"按模型：{'，'.join(model_parts)}\n"
                     f"按用户（Top5）：{'，'.join(user_parts)}")
 
         @filter.llm_tool(name="query_presets")
-        async def query_presets(self, event: AstrMessageEvent, preset_name: str = ""):
+        async def query_presets(self, event: AstrMessageEvent, preset_name: Any = _PARAM_NOT_SET):
             """查询生图预设（风格指令）列表或指定预设的提示词内容。用户问「有哪些预设/风格指令」「某个预设的提示词」时可调用。本工具不执行生图，仅查询。
 
             Args:
-                preset_name(string): 预设触发词（如 手办化），留空则列出全部预设触发词
+                preset_name(string): 预设触发词（查全部可填空串）
             """
+            force_full = bool(self.conf.get("force_full_params", False))
+            if force_full and preset_name is _PARAM_NOT_SET:
+                template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                if not template:
+                    template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                return template.replace("{errors}", "\n- preset_name: 未指定预设名称参数（查询全部请传空字符串）")
+
             if not self.prompt_map:
                 return "当前未配置任何生图预设。"
-            keyword = (preset_name or "").strip()
-            if keyword:
+            keyword = str(preset_name or "").strip() if preset_name is not _PARAM_NOT_SET else ""
+            if keyword and keyword != "all":
                 prompt = self.prompt_map.get(keyword)
                 if not prompt:
                     return f"未找到预设 [{keyword}]。可用预设：{'、'.join(list(self.prompt_map.keys()))}"
@@ -3071,11 +3158,28 @@ class FigurineProPlugin(Star):
             return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
 
     def _get_llm_tool_system_prompt(self) -> str:
-        """获取注入到系统提示词中的生图函数工具说明。支持用户自定义覆盖。"""
+        """获取注入到系统提示词中的生图函数工具说明。支持用户自定义覆盖与智力矫正模式适配。"""
         custom = str(self.conf.get("custom_llm_tool_system_prompt", "") or "").strip()
         if custom:
             return custom
-        return DEFAULT_LLM_TOOL_SYSTEM_PROMPT.strip()
+        prompt_text = DEFAULT_LLM_TOOL_SYSTEM_PROMPT.strip()
+        force_full = bool(self.conf.get("force_full_params", False))
+        force_en = bool(self.conf.get("force_english_tags", False))
+        if force_full or force_en:
+            correction_rules = ["\n\n【⚠️ 智力矫正模式 - 强制调用规范】："]
+            if force_full:
+                correction_rules.append(
+                    "- 必须【完整填写所有参数】：严禁漏填任何参数！调用 generate_image 时必须显式携带 prompt、model、params、selfie、nsfw 所有字段（params 必须为包含 size/steps 等配置的对象，不可为空对象）。严禁偷懒省略参数！"
+                )
+            if force_en:
+                correction_rules.append(
+                    "- 必须【纯英文 Tag】：prompt 参数中绝对严禁出现任何中文字符！必须将用户的所有需求完整扩写并翻译成纯英文 Tag 后再传入！"
+                )
+            correction_rules.append(
+                "- 若违反上述规范，系统将直接严厉拒绝并打回，请务必一次性准确完整地填写所有参数！"
+            )
+            prompt_text += "\n".join(correction_rules)
+        return prompt_text
 
     if hasattr(filter, "on_llm_request"):
         @filter.on_llm_request()
@@ -4258,6 +4362,10 @@ class FigurineProPlugin(Star):
         # LLM 工具系统提示词注入
         "enable_llm_tool_system_prompt": bool,
         "custom_llm_tool_system_prompt": str,
+        # 智力矫正
+        "force_full_params": bool,
+        "force_english_tags": bool,
+        "correction_reject_template": str,
     }
 
     def _register_web_apis(self) -> None:
@@ -5151,6 +5259,10 @@ class FigurineProPlugin(Star):
                 # LLM 工具系统提示词注入
                 "enable_llm_tool_system_prompt": bool(self.conf.get("enable_llm_tool_system_prompt", True)),
                 "custom_llm_tool_system_prompt": str(self.conf.get("custom_llm_tool_system_prompt", "") or ""),
+                # 智力矫正
+                "force_full_params": bool(self.conf.get("force_full_params", False)),
+                "force_english_tags": bool(self.conf.get("force_english_tags", False)),
+                "correction_reject_template": str(self.conf.get("correction_reject_template", "") or ""),
             })
         except Exception as e:
             return error_response(str(e))
@@ -5198,6 +5310,9 @@ class FigurineProPlugin(Star):
                 "help_menu": "帮助菜单", "prompt_list": "预设 prompt",
                 "enable_llm_tool_system_prompt": "启用生图工具系统提示词注入",
                 "custom_llm_tool_system_prompt": "自定义生图工具系统提示词",
+                "force_full_params": "智力矫正：强制参数完整",
+                "force_english_tags": "智力矫正：强制纯英文 Tag",
+                "correction_reject_template": "智力矫正：打回提示词模板",
             }
             # AstrBotConfig(dict) 无 set 方法：先收集更新项，最后一次性原子落盘（避免多次写盘）
             config_updates: Dict[str, Any] = {}

@@ -509,6 +509,10 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 <span>基础设定</span>
               </button>
+              <button type="button" class="sub-tab-btn" data-cfgtab="tab-correction" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>智力矫正</span>
+              </button>
             </div>
           </div>
 
@@ -942,6 +946,34 @@
                   <label class="field" data-field="help_menu">
                     <span class="field-label">帮助菜单（空=默认）</span>
                     <textarea id="cfgHelpMenu" class="input" rows="5" placeholder="自定义帮助文本，留空使用默认"></textarea>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 分栏 5：智力矫正 (强制参数完整 / 强制英文tag / 严厉打回提示词) -->
+          <div class="cfg-tab-panel" id="panel-tab-correction" hidden>
+            <div class="settings-grid">
+              <div class="card" id="card-intelligence-correction">
+                <div class="card-head">
+                  <div>
+                    <h3 class="card-title">傻瓜模型智力矫正</h3>
+                    <p class="card-desc">专门针对只会塞提示词、不带任何参数的劣质/弱智模型。开启后强制要求所有参数完整、强制纯英文 Tag，缺参或填错直接严厉打回！</p>
+                  </div>
+                </div>
+                <div class="form">
+                  <label class="field field-row" data-field="force_full_params">
+                    <span class="field-label">强制参数完整<i class="field-hint">开启后调用生图工具必须显式携带所有参数（model/params/selfie/nsfw等），缺少、空值或填错直接打回重写</i></span>
+                    <input type="checkbox" id="cfgForceFullParams" class="switch">
+                  </label>
+                  <label class="field field-row" data-field="force_english_tags">
+                    <span class="field-label">强制纯英文 Tag<i class="field-hint">开启后检测到提示词中包含中文字符，直接打回要求模型扩写为纯英文 Tag 后重新调用</i></span>
+                    <input type="checkbox" id="cfgForceEnglishTags" class="switch">
+                  </label>
+                  <label class="field" data-field="correction_reject_template">
+                    <span class="field-label">打回提示词模板<i class="field-hint">模型参数不全或带中文时直接返回给模型的报错文本，{errors} 会被替换为具体错误说明</i></span>
+                    <textarea id="cfgCorrectionRejectTemplate" class="input textarea" rows="3" placeholder="你是傻逼吗，参数都不填全。再不会填别吃token了。&#10;以下参数错误：{errors}"></textarea>
                   </label>
                 </div>
               </div>

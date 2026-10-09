@@ -429,5 +429,23 @@
     "type": "text",
     "hint": "留空则使用内置的高质量扩写生图说明。可在此输入自定义的指导提示词以覆盖默认规则。",
     "default": ""
+  },
+  "force_full_params": {
+    "description": "【智力矫正】强制参数完整",
+    "type": "bool",
+    "hint": "开启后，所有函数工具的所有参数都必须显式传入，严禁依赖默认值。若模型漏填、填错参数，将直接打回并严厉报错。",
+    "default": false
+  },
+  "force_english_tags": {
+    "description": "【智力矫正】强制纯英文 Tag",
+    "type": "bool",
+    "hint": "开启后，检测到 prompt 中包含中文字符，直接打回要求模型扩写为纯英文 Tag 后重新调用。",
+    "default": false
+  },
+  "correction_reject_template": {
+    "description": "【智力矫正】打回提示词模板",
+    "type": "text",
+    "hint": "模型参数不全或带中文时直接打回给模型的回复模板。{errors} 会被替换为具体错误说明。",
+    "default": "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
   }
 }

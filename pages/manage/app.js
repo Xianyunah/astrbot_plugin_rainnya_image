@@ -1389,7 +1389,9 @@
     enable_checkin: "tab-base", checkin_fixed_reward: "tab-base", enable_random_checkin: "tab-base",
     checkin_random_reward_min: "tab-base", checkin_random_reward_max: "tab-base",
     user_whitelist: "tab-base", user_blacklist: "tab-base", group_whitelist: "tab-base", group_blacklist: "tab-base",
-    help_menu: "tab-base"
+    help_menu: "tab-base",
+    // 智力矫正
+    force_full_params: "tab-correction", force_english_tags: "tab-correction", correction_reject_template: "tab-correction"
   };
 
   // 字段与 DOM 元素 ID 映射表
@@ -1411,7 +1413,8 @@
     enable_checkin: "cfgEnableCheckin", checkin_fixed_reward: "cfgCheckinFixed", enable_random_checkin: "cfgRandomCheckin",
     checkin_random_reward_min: "cfgCheckinMin", checkin_random_reward_max: "cfgCheckinMax",
     user_whitelist: "cfgUserWhite", user_blacklist: "cfgUserBlack", group_whitelist: "cfgGroupWhite", group_blacklist: "cfgGroupBlack",
-    help_menu: "cfgHelpMenu", prompt_list: "cfgPromptList"
+    help_menu: "cfgHelpMenu", prompt_list: "cfgPromptList",
+    force_full_params: "cfgForceFullParams", force_english_tags: "cfgForceEnglishTags", correction_reject_template: "cfgCorrectionRejectTemplate"
   };
 
   function switchConfigTab(tabId) {
@@ -1542,6 +1545,10 @@
       /* 帮助与预设 */
       el("cfgHelpMenu").value = c.help_menu || "";
       el("cfgPromptList").value = (c.prompt_list || []).join("\n");
+      /* 智力矫正 */
+      if (el("cfgForceFullParams")) el("cfgForceFullParams").checked = !!c.force_full_params;
+      if (el("cfgForceEnglishTags")) el("cfgForceEnglishTags").checked = !!c.force_english_tags;
+      if (el("cfgCorrectionRejectTemplate")) el("cfgCorrectionRejectTemplate").value = c.correction_reject_template || "";
     } catch (e) {
       toast("加载配置失败：" + e.message, "error");
     }
@@ -1717,6 +1724,10 @@
       checkin_random_reward_max: parseInt(el("cfgCheckinMax").value, 10) || 0,
       /* 帮助菜单 */
       help_menu: el("cfgHelpMenu").value,
+      /* 智力矫正 */
+      force_full_params: el("cfgForceFullParams") ? el("cfgForceFullParams").checked : false,
+      force_english_tags: el("cfgForceEnglishTags") ? el("cfgForceEnglishTags").checked : false,
+      correction_reject_template: el("cfgCorrectionRejectTemplate") ? el("cfgCorrectionRejectTemplate").value : "",
     };
     var btn = el("btnConfigSave");
     btn.disabled = true;
