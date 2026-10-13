@@ -5,7 +5,7 @@ AstrBot 生图插件 fork（自用增强版）。本文只记录 agent 容易判
 ## 当前状态
 
 - 当前分支：`main`；主要自用远端为 Gitea `origin`，另有 GitHub `github` 与上游 `upstream`。
-- 插件元数据在 `metadata.yaml`：名称 `astrbot_plugin_rainnya_image`，版本 `v1.2.0`。
+- 插件元数据在 `metadata.yaml`：名称 `astrbot_plugin_rainnya_image`，版本 `v1.2.1`。
 - 没有本地真实生图测试；真实验证需要 AstrBot 运行时和有效 API key。
 
 ## 结构

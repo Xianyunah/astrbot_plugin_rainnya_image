@@ -632,6 +632,18 @@
                     <span class="field-label">负面提示词（每行一个）</span>
                     <textarea id="cfgNovalaiNeg" class="input" rows="3" placeholder="负面词，每行一个"></textarea>
                   </label>
+                  <label class="field field-row" data-field="novalai_429_retry_enabled" style="grid-column: 1 / -1;">
+                    <span class="field-label">启用 429 自动重试机制<i class="field-hint">遇到 NovelAI 官方或反代 429 频率限制时后台静默重试，重试期间不发任何消息，全部失败后才报错</i></span>
+                    <input type="checkbox" id="cfgNovalai429RetryEnabled" class="switch">
+                  </label>
+                  <label class="field" data-field="novalai_429_max_retries">
+                    <span class="field-label">429 最大重试次数</span>
+                    <input type="number" id="cfgNovalai429MaxRetries" class="input" min="1" max="50" placeholder="10">
+                  </label>
+                  <label class="field" data-field="novalai_429_retry_delay">
+                    <span class="field-label">429 每次重试间隔（秒）</span>
+                    <input type="number" id="cfgNovalai429RetryDelay" class="input" min="1" max="60" placeholder="5">
+                  </label>
                 </div>
               </div>
 
@@ -1288,6 +1300,6 @@
 
   <!-- 显式先加载 bridge SDK，保证 app.js 同步取到 window.AstrBotPluginPage（AstrBot 见已有此标签则不再重复注入） -->
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=1.2.0"></script>
+  <script src="./app.js?v=1.2.1"></script>
 </body>
 </html>

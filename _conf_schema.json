@@ -151,6 +151,24 @@
     "hint": "NovalAI 渠道生图时使用的负面词。留空则使用插件内置默认负面词模板。",
     "default": ""
   },
+  "novalai_429_retry_enabled": {
+    "description": "【NovalAI 渠道】启用 429 频率限制自动重试",
+    "type": "bool",
+    "hint": "开启后，当 NovelAI (官方或反代) 返回 HTTP 429 请求受限时，将在后台静默自动重试，重试期间不发送任何报错，直至成功或全部重试耗尽。",
+    "default": true
+  },
+  "novalai_429_max_retries": {
+    "description": "【NovalAI 渠道】429 最大重试次数",
+    "type": "int",
+    "hint": "遇到 429 时的最大自动重试次数。默认 10 次。全部重试耗尽仍失败时才向会话发送报错。",
+    "default": 10
+  },
+  "novalai_429_retry_delay": {
+    "description": "【NovalAI 渠道】429 每次重试间隔时间（秒）",
+    "type": "int",
+    "hint": "每次遇到 429 时的静默等待时间（秒）。默认 5 秒。",
+    "default": 5
+  },
   "user_whitelist": {
     "description": "【权限】用户白名单",
     "type": "list",

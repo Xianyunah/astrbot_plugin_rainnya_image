@@ -1373,6 +1373,7 @@
     safety_level: "tab-params", image_size: "tab-params", hires_whitelist: "tab-params",
     novalai_size: "tab-params", novalai_sampler: "tab-params", novalai_steps: "tab-params",
     novalai_scale: "tab-params", novalai_negative_prompt: "tab-params",
+    novalai_429_retry_enabled: "tab-params", novalai_429_max_retries: "tab-params", novalai_429_retry_delay: "tab-params",
     novai_precheck_enabled: "tab-params", novai_precheck_timeout: "tab-params", novai_point_warn_threshold: "tab-params",
     // 绘图防护
     auto_recall_enabled: "tab-defense", auto_recall_delay: "tab-defense", auto_recall_allowed_groups: "tab-defense",
@@ -1400,6 +1401,7 @@
     safety_level: "cfgSafety", image_size: "cfgImageSize", hires_whitelist: "cfgHires",
     novalai_size: "cfgNovalaiSize", novalai_sampler: "cfgNovalaiSampler", novalai_steps: "cfgNovalaiSteps",
     novalai_scale: "cfgNovalaiScale", novalai_negative_prompt: "cfgNovalaiNeg",
+    novalai_429_retry_enabled: "cfgNovalai429RetryEnabled", novalai_429_max_retries: "cfgNovalai429MaxRetries", novalai_429_retry_delay: "cfgNovalai429RetryDelay",
     novai_precheck_enabled: "cfgNovaiPrecheck", novai_precheck_timeout: "cfgNovaiPrecheckTimeout", novai_point_warn_threshold: "cfgNovaiWarn",
     auto_recall_enabled: "cfgAutoRecall", auto_recall_delay: "cfgAutoRecallDelay", auto_recall_allowed_groups: "cfgAutoRecallGroups",
     nsfw_filter_enabled: "cfgNsfwFilter", nsfw_filter_tags: "cfgNsfwTags", nsfw_zip_enabled: "cfgNsfwZipEnabled",
@@ -1502,6 +1504,9 @@
       el("cfgNovalaiSteps").value = c.novalai_steps != null ? c.novalai_steps : "";
       el("cfgNovalaiScale").value = c.novalai_scale != null ? c.novalai_scale : "";
       el("cfgNovalaiNeg").value = c.novalai_negative_prompt || "";
+      if (el("cfgNovalai429RetryEnabled")) el("cfgNovalai429RetryEnabled").checked = c.novalai_429_retry_enabled !== false;
+      if (el("cfgNovalai429MaxRetries")) el("cfgNovalai429MaxRetries").value = c.novalai_429_max_retries != null ? c.novalai_429_max_retries : 10;
+      if (el("cfgNovalai429RetryDelay")) el("cfgNovalai429RetryDelay").value = c.novalai_429_retry_delay != null ? c.novalai_429_retry_delay : 5;
       /* NovelAI 预检 */
       el("cfgNovaiPrecheck").checked = !!c.novai_precheck_enabled;
       el("cfgNovaiPrecheckTimeout").value = c.novai_precheck_timeout != null ? c.novai_precheck_timeout : 10;
@@ -1632,6 +1637,16 @@
         return false;
       }
     }
+    var n429Retries = parseInt(el("cfgNovalai429MaxRetries").value, 10);
+    if (isNaN(n429Retries) || n429Retries < 1 || n429Retries > 50) {
+      highlightFieldError("novalai_429_max_retries", "参数设定 → NovelAI 429 最大重试次数：必须在 1 到 50 之间");
+      return false;
+    }
+    var n429Delay = parseInt(el("cfgNovalai429RetryDelay").value, 10);
+    if (isNaN(n429Delay) || n429Delay < 1 || n429Delay > 60) {
+      highlightFieldError("novalai_429_retry_delay", "参数设定 → NovelAI 429 重试间隔：必须在 1 到 60 秒之间");
+      return false;
+    }
 
     // 3. 增强模块校验
     var taggerTemp = el("cfgTaggerTemp").value.trim();
@@ -1682,6 +1697,9 @@
       novalai_steps: parseInt(el("cfgNovalaiSteps").value, 10) || 23,
       novalai_scale: parseFloat(el("cfgNovalaiScale").value) || 6.0,
       novalai_negative_prompt: el("cfgNovalaiNeg").value,
+      novalai_429_retry_enabled: el("cfgNovalai429RetryEnabled") ? el("cfgNovalai429RetryEnabled").checked : true,
+      novalai_429_max_retries: parseInt(el("cfgNovalai429MaxRetries").value, 10) || 10,
+      novalai_429_retry_delay: parseInt(el("cfgNovalai429RetryDelay").value, 10) || 5,
       /* NovelAI 预检 */
       novai_precheck_enabled: el("cfgNovaiPrecheck").checked,
       novai_precheck_timeout: parseInt(el("cfgNovaiPrecheckTimeout").value, 10) || 10,

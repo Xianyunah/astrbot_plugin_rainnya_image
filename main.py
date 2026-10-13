@@ -442,7 +442,7 @@ def _rejoin_prompt_list(items: List[Any]) -> List[str]:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.2.0",
+    "1.2.1",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
@@ -4079,56 +4079,78 @@ class FigurineProPlugin(Star):
                     f"Action={'img2img' if img2img else 'generate'}, "
                     f"Size={width}x{height}, Steps={steps}")
 
+        # ========== 读取 429 自动重试配置 ==========
+        retry_enabled = bool(self.conf.get("novalai_429_retry_enabled", True))
         try:
-            if not self.iwf:
-                return "ImageWorkflow 未初始化"
-            async with self.iwf.session.post(
-                endpoint, json=request_body, headers=headers,
-                proxy=self.iwf.proxy, timeout=self.api_timeout,
-            ) as resp:
-                if resp.status != 200:
-                    raw = await resp.read()
-                    err_msg = f"NovelAI API请求失败 (HTTP {resp.status})"
-                    try:
-                        err_json = json.loads(raw.decode("utf-8", errors="replace"))
-                        detail = (err_json.get("message") or err_json.get("detail")
-                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
-                        err_msg = f"{err_msg}: {str(detail)[:300]}"
-                    except Exception:
-                        err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
-                    if resp.status >= 500:
-                        err_msg = f"⚠️ NovelAI 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
-                    logger.error(err_msg)
-                    return err_msg
+            max_retries = max(1, min(int(self.conf.get("novalai_429_max_retries", 10)), 50)) if retry_enabled else 0
+        except (TypeError, ValueError):
+            max_retries = 10 if retry_enabled else 0
+        try:
+            retry_delay = max(1, min(int(self.conf.get("novalai_429_retry_delay", 5)), 60))
+        except (TypeError, ValueError):
+            retry_delay = 5
 
-                data = await resp.read()
+        attempt = 0
+        while True:
+            try:
+                if not self.iwf:
+                    return "ImageWorkflow 未初始化"
+                async with self.iwf.session.post(
+                    endpoint, json=request_body, headers=headers,
+                    proxy=self.iwf.proxy, timeout=self.api_timeout,
+                ) as resp:
+                    # 遇到 429 且未达到最大重试次数：完全静默重试，不向会话发送任何信息
+                    if resp.status == 429 and attempt < max_retries:
+                        attempt += 1
+                        logger.info(f"[NewImage/NovelAI] 遇到 429 频率限制，后台静默等待 {retry_delay}s 后重试 ({attempt}/{max_retries})...")
+                        await asyncio.sleep(retry_delay)
+                        continue
 
-                # ========== 解压 ZIP，取第一张图 ==========
-                try:
-                    zf = zipfile.ZipFile(io.BytesIO(data))
-                    names = zf.namelist()
-                    image_name = next((n for n in names
-                                       if n.endswith(".png") or n.endswith(".webp") or n.endswith(".jpg")), None)
-                    if image_name is None:
-                        return f"NovelAI 响应中没有找到图片文件（zip 内含: {names[:5]}）"
-                    return zf.read(image_name)
-                except zipfile.BadZipFile:
-                    # 非 zip（可能是错误 JSON / 空响应）
-                    body = data[:300].decode("utf-8", errors="replace")
-                    logger.error(f"NovelAI 响应不是合法 ZIP: {body}")
+                    if resp.status != 200:
+                        raw = await resp.read()
+                        err_msg = f"NovelAI API请求失败 (HTTP {resp.status})"
+                        try:
+                            err_json = json.loads(raw.decode("utf-8", errors="replace"))
+                            detail = (err_json.get("message") or err_json.get("detail")
+                                      or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                            err_msg = f"{err_msg}: {str(detail)[:300]}"
+                        except Exception:
+                            err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
+                        if resp.status == 429:
+                            err_msg = f"⚠️ NovelAI 频率限制 (HTTP 429)，已连续静默重试 {max_retries} 次仍受限，请稍后重试。"
+                        elif resp.status >= 500:
+                            err_msg = f"⚠️ NovelAI 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
+                        logger.error(err_msg)
+                        return err_msg
+
+                    data = await resp.read()
+
+                    # ========== 解压 ZIP，取第一张图 ==========
                     try:
-                        err_json = json.loads(body)
-                        detail = (err_json.get("message") or err_json.get("detail")
-                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
-                        return f"NovelAI 返回错误: {str(detail)[:300]}"
-                    except Exception:
-                        return f"NovelAI 返回了无法解析的响应（非图片 ZIP）: {body[:200]}"
-        except asyncio.TimeoutError:
-            logger.error("NovelAI API 请求超时")
-            return "请求超时"
-        except Exception as e:
-            logger.error(f"调用 NovelAI API 时发生未知错误: {e}", exc_info=True)
-            return f"发生未知错误: {e}"
+                        zf = zipfile.ZipFile(io.BytesIO(data))
+                        names = zf.namelist()
+                        image_name = next((n for n in names
+                                           if n.endswith(".png") or n.endswith(".webp") or n.endswith(".jpg")), None)
+                        if image_name is None:
+                            return f"NovelAI 响应中没有找到图片文件（zip 内含: {names[:5]}）"
+                        return zf.read(image_name)
+                    except zipfile.BadZipFile:
+                        # 非 zip（可能是错误 JSON / 空响应）
+                        body = data[:300].decode("utf-8", errors="replace")
+                        logger.error(f"NovelAI 响应不是合法 ZIP: {body}")
+                        try:
+                            err_json = json.loads(body)
+                            detail = (err_json.get("message") or err_json.get("detail")
+                                      or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                            return f"NovelAI 返回错误: {str(detail)[:300]}"
+                        except Exception:
+                            return f"NovelAI 返回了无法解析的响应（非图片 ZIP）: {body[:200]}"
+            except asyncio.TimeoutError:
+                logger.error("NovelAI API 请求超时")
+                return "请求超时"
+            except Exception as e:
+                logger.error(f"调用 NovelAI API 时发生未知错误: {e}", exc_info=True)
+                return f"发生未知错误: {e}"
 
     async def _call_novalai_reverse_proxy_api(self, api_url: str, api_key: str, model_name: str,
                                               image_bytes_list: List[bytes], prompt: str,
@@ -4212,80 +4234,102 @@ class FigurineProPlugin(Star):
         logger.info(f"[NewImage/NovelAI-反代] 发送请求 [{source_info}]: Model={model_name}, "
                     f"Size={width}x{height}, Steps={steps}, Sampler={sampler}")
 
+        # ========== 读取 429 自动重试配置 ==========
+        retry_enabled = bool(self.conf.get("novalai_429_retry_enabled", True))
         try:
-            if not self.iwf:
-                return "ImageWorkflow 未初始化"
-            async with self.iwf.session.get(
-                endpoint, params=params,
-                ssl=False,  # 反代常为自签/无证书，跳过 TLS 校验
-                proxy=self.iwf.proxy, timeout=self.api_timeout,
-            ) as resp:
-                if resp.status != 200:
-                    raw = await resp.read()
-                    err_msg = f"NovelAI 反代请求失败 (HTTP {resp.status})"
-                    try:
-                        err_json = json.loads(raw.decode("utf-8", errors="replace"))
-                        detail = (err_json.get("message") or err_json.get("detail")
-                                  or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
-                        err_msg = f"{err_msg}: {str(detail)[:300]}"
-                    except Exception:
-                        err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
-                    if resp.status >= 500:
-                        err_msg = f"⚠️ NovelAI 反代服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
-                    logger.error(err_msg)
-                    return err_msg
+            max_retries = max(1, min(int(self.conf.get("novalai_429_max_retries", 10)), 50)) if retry_enabled else 0
+        except (TypeError, ValueError):
+            max_retries = 10 if retry_enabled else 0
+        try:
+            retry_delay = max(1, min(int(self.conf.get("novalai_429_retry_delay", 5)), 60))
+        except (TypeError, ValueError):
+            retry_delay = 5
 
-                content_type = resp.headers.get("Content-Type", "")
-                data = await resp.read()
+        attempt = 0
+        while True:
+            try:
+                if not self.iwf:
+                    return "ImageWorkflow 未初始化"
+                async with self.iwf.session.get(
+                    endpoint, params=params,
+                    ssl=False,  # 反代常为自签/无证书，跳过 TLS 校验
+                    proxy=self.iwf.proxy, timeout=self.api_timeout,
+                ) as resp:
+                    # 遇到 429 且未达到最大重试次数：完全静默重试，不向会话发送任何信息
+                    if resp.status == 429 and attempt < max_retries:
+                        attempt += 1
+                        logger.info(f"[NewImage/NovelAI-反代] 遇到 429 频率限制，后台静默等待 {retry_delay}s 后重试 ({attempt}/{max_retries})...")
+                        await asyncio.sleep(retry_delay)
+                        continue
 
-                # ========== JSON 响应：取图片 URL / data 再下载 ==========
-                if "json" in content_type.lower():
-                    try:
-                        payload = json.loads(data.decode("utf-8", errors="replace"))
-                    except Exception:
-                        return f"NovelAI 反代返回了无法解析的 JSON: {data[:200].decode('utf-8', errors='replace')}"
-                    # 依次取 url/image_url/image/data 第一个非空字段
-                    img_ref = None
-                    if isinstance(payload, dict):
-                        for k in ("url", "image_url", "image", "data"):
-                            v = payload.get(k)
-                            if v:
-                                img_ref = v
-                                break
-                    if not img_ref:
-                        return f"NovelAI 反代响应中未找到图片（JSON: {str(payload)[:300]}）"
-                    img_url = str(img_ref)
-                    if img_url.startswith("data:"):  # data URL（base64）
+                    if resp.status != 200:
+                        raw = await resp.read()
+                        err_msg = f"NovelAI 反代请求失败 (HTTP {resp.status})"
                         try:
-                            b64_part = img_url.split(",", 1)[1]
-                            return base64.b64decode(b64_part)
-                        except Exception as e:
-                            logger.error(f"[NewImage/NovelAI-反代] data URL 解码失败: {e}", exc_info=True)
-                            return f"NovelAI 反代图片 data URL 解码失败: {e}"
-                    # http(s) URL → 再下载
-                    try:
-                        async with self.iwf.session.get(img_url, ssl=False,
-                                                        proxy=self.iwf.proxy,
-                                                        timeout=self.api_timeout) as img_resp:
-                            if img_resp.status != 200:
-                                return f"NovelAI 反代图片下载失败 (HTTP {img_resp.status})"
-                            return await img_resp.read()
-                    except asyncio.TimeoutError:
-                        return "NovelAI 反代图片下载超时"
-                    except Exception as e:
-                        logger.error(f"[NewImage/NovelAI-反代] 下载图片失败: {e}", exc_info=True)
-                        return f"NovelAI 反代图片下载失败: {e}"
+                            err_json = json.loads(raw.decode("utf-8", errors="replace"))
+                            detail = (err_json.get("message") or err_json.get("detail")
+                                      or err_json.get("error") or json.dumps(err_json, ensure_ascii=False))
+                            err_msg = f"{err_msg}: {str(detail)[:300]}"
+                        except Exception:
+                            err_msg = f"{err_msg}: {raw[:200].decode('utf-8', errors='replace')}"
+                        if resp.status == 429:
+                            err_msg = f"⚠️ NovelAI 反代频率限制 (HTTP 429)，已连续静默重试 {max_retries} 次仍受限，请稍后重试。"
+                        elif resp.status >= 500:
+                            err_msg = f"⚠️ NovelAI 反代服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
+                        logger.error(err_msg)
+                        return err_msg
 
-                # ========== 非 JSON：响应体即图片二进制（PNG） ==========
-                if not data:
-                    return "NovelAI 反代返回了空响应"
-                return data
-        except asyncio.TimeoutError:
-            logger.error("NovelAI 反代请求超时")
-            return "请求超时"
-        except Exception as e:
-            logger.error(f"调用 NovelAI 反代 API 时发生未知错误: {e}", exc_info=True)
-            return f"发生未知错误: {e}"
+                    content_type = resp.headers.get("Content-Type", "")
+                    data = await resp.read()
+
+                    # ========== JSON 响应：取图片 URL / data 再下载 ==========
+                    if "json" in content_type.lower():
+                        try:
+                            payload = json.loads(data.decode("utf-8", errors="replace"))
+                        except Exception:
+                            return f"NovelAI 反代返回了无法解析的 JSON: {data[:200].decode('utf-8', errors='replace')}"
+                        # 依次取 url/image_url/image/data 第一个非空字段
+                        img_ref = None
+                        if isinstance(payload, dict):
+                            for k in ("url", "image_url", "image", "data"):
+                                v = payload.get(k)
+                                if v:
+                                    img_ref = v
+                                    break
+                        if not img_ref:
+                            return f"NovelAI 反代响应中未找到图片（JSON: {str(payload)[:300]}）"
+                        img_url = str(img_ref)
+                        if img_url.startswith("data:"):  # data URL（base64）
+                            try:
+                                b64_part = img_url.split(",", 1)[1]
+                                return base64.b64decode(b64_part)
+                            except Exception as e:
+                                logger.error(f"[NewImage/NovelAI-反代] data URL 解码失败: {e}", exc_info=True)
+                                return f"NovelAI 反代图片 data URL 解码失败: {e}"
+                        # http(s) URL → 再下载
+                        try:
+                            async with self.iwf.session.get(img_url, ssl=False,
+                                                            proxy=self.iwf.proxy,
+                                                            timeout=self.api_timeout) as img_resp:
+                                if img_resp.status != 200:
+                                    return f"NovelAI 反代图片下载失败 (HTTP {img_resp.status})"
+                                return await img_resp.read()
+                        except asyncio.TimeoutError:
+                            return "NovelAI 反代图片下载超时"
+                        except Exception as e:
+                            logger.error(f"[NewImage/NovelAI-反代] 下载图片失败: {e}", exc_info=True)
+                            return f"NovelAI 反代图片下载失败: {e}"
+
+                    # ========== 非 JSON：响应体即图片二进制（PNG） ==========
+                    if not data:
+                        return "NovelAI 反代返回了空响应"
+                    return data
+            except asyncio.TimeoutError:
+                logger.error("NovelAI 反代请求超时")
+                return "请求超时"
+            except Exception as e:
+                logger.error(f"调用 NovelAI 反代 API 时发生未知错误: {e}", exc_info=True)
+                return f"发生未知错误: {e}"
 
     # ========== 插件 WebUI 后端 API（context.register_web_api） ==========
     WEB_PLUGIN_NAME = "astrbot_plugin_rainnya_image"
@@ -4314,6 +4358,9 @@ class FigurineProPlugin(Star):
         "novalai_steps": int,        # 1-50
         "novalai_scale": float,      # CFG 0-10
         "novalai_negative_prompt": str,  # 负面词（空=用默认模板）
+        "novalai_429_retry_enabled": bool,  # 429自动重试开关
+        "novalai_429_max_retries": int,     # 429最大重试次数
+        "novalai_429_retry_delay": int,     # 429重试等待间隔(秒)
         # 权限
         "user_whitelist": list,
         "user_blacklist": list,
@@ -5211,6 +5258,9 @@ class FigurineProPlugin(Star):
                 "novalai_steps": self.conf.get("novalai_steps", 23),
                 "novalai_scale": self.conf.get("novalai_scale", 6.0),
                 "novalai_negative_prompt": str(self.conf.get("novalai_negative_prompt", "") or ""),
+                "novalai_429_retry_enabled": bool(self.conf.get("novalai_429_retry_enabled", True)),
+                "novalai_429_max_retries": self.conf.get("novalai_429_max_retries", 10),
+                "novalai_429_retry_delay": self.conf.get("novalai_429_retry_delay", 5),
                 # 权限
                 "user_whitelist": self.conf.get("user_whitelist", []),
                 "user_blacklist": self.conf.get("user_blacklist", []),
@@ -5291,7 +5341,11 @@ class FigurineProPlugin(Star):
                 "image_size": "Gemini 全局默认分辨率", "hires_whitelist": "高分辨率白名单",
                 "novalai_size": "NovelAI 默认分辨率", "novalai_sampler": "NovelAI 采样器",
                 "novalai_steps": "NovelAI 采样步数", "novalai_scale": "NovelAI 引导强度 scale",
-                "novalai_negative_prompt": "NovelAI 负面提示词", "novai_precheck_enabled": "NovelAI 启用预检",
+                "novalai_negative_prompt": "NovelAI 负面提示词",
+                "novalai_429_retry_enabled": "NovelAI 启用 429 自动重试",
+                "novalai_429_max_retries": "NovelAI 429 最大重试次数",
+                "novalai_429_retry_delay": "NovelAI 429 重试等待间隔",
+                "novai_precheck_enabled": "NovelAI 启用预检",
                 "novai_precheck_timeout": "NovelAI 预检超时", "novai_point_warn_threshold": "NovelAI 点数不足提醒阈值",
                 "auto_recall_enabled": "启用自动撤回", "auto_recall_delay": "自动撤回延迟",
                 "auto_recall_allowed_groups": "自动撤回生效群", "nsfw_filter_enabled": "启用 NSFW 过滤",
@@ -5347,6 +5401,10 @@ class FigurineProPlugin(Star):
                         value = max(64, min(value, 16384))
                     elif key == "novalai_steps":
                         value = max(1, min(value, 50))
+                    elif key == "novalai_429_max_retries":
+                        value = max(1, min(value, 50))
+                    elif key == "novalai_429_retry_delay":
+                        value = max(1, min(value, 60))
                 elif expected is list:
                     if not isinstance(value, list):
                         return error_response(f"{label}：格式必须为列表")
