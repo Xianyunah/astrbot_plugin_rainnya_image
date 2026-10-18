@@ -290,10 +290,11 @@ DEFAULT_LLM_TOOL_SYSTEM_PROMPT = """# AI 绘画与生图工具能力指引 (Imag
 4. 【图+文生图能力】：
    - 若用户在当前消息中附带了图片并要求以此图画图、手办化或改变画风，`generate_image` 会自动提取图片作为参考进行图生图。
 
-5. 【辅助查询工具】：
+5. 【辅助查询与预设指引】：
    - 用户询问「我还能画几次图」或「生图配额」时，调用 `query_generation_quota` 查询；
    - 用户询问「有哪些生图模型可以用」时，调用 `query_generation_models` 查询；
-   - 用户询问「有哪些画风预设」时，调用 `query_presets` 查询。"""
+   - 用户询问「有哪些画风预设」或「有哪些画师串/画师预设」时，调用 `query_presets` 查询（支持按 category="artist" 查画师串、category="style" 查风格预设，或 category="all" 查全部）；
+   - 当用户要求使用特定画师风格（或画师串）生图时，可在 `query_presets` 获取画师预设名后，在 `generate_image(artist_preset="预设名")` 中直接传入该画师预设名，系统会自动将该画师串及其负面词并入生成参数！不使用画师串时请传空字符串 `""`。"""
 
 # ========== 各提供商类型的默认模型模板（添加提供商时自动填充，可再编辑） ==========
 # novalai 列表来自反代 std.loliyc.com 的 /v1/models 实测（2026-08-30）
@@ -442,7 +443,7 @@ def _rejoin_prompt_list(items: List[Any]) -> List[str]:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.2.1",
+    "1.2.2",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
@@ -2750,11 +2751,12 @@ class FigurineProPlugin(Star):
         @filter.llm_tool(name="generate_image")
         async def generate_image(self, event: AstrMessageEvent, prompt: str = "", model: Any = _PARAM_NOT_SET,
                                  params: Any = _PARAM_NOT_SET, selfie: Any = _PARAM_NOT_SET,
-                                 nsfw: Any = _PARAM_NOT_SET):
+                                 nsfw: Any = _PARAM_NOT_SET, artist_preset: Any = _PARAM_NOT_SET):
             """根据用户的绘画需求生成一张图片。调用前，必须先把用户的绘画需求扩写完善为详细、高质量、适合 AI 绘画的完整英文提示词（包含主体、风格、构图、光线、细节等要素），再作为 prompt 参数传入。只有在用户明确要求生成或绘制图片时才调用本工具。
 
             注意：若用户在当前消息（或引用/刚发送的消息）中附带图片，本工具会自动提取该图片作为参考进行「图+文生图」；若纯文本描述则进行「文生图」。
             注意：若用户要求绘制「你（AI 自己）」的自拍或形象（例如「画你自己」「你的自拍」「画你的样子」等），请将 selfie 参数设为 true，本工具会自动在提示词前追加预设的 AI 人物外貌特征（发色/瞳色/气质等），使形象保持一致。
+            注意：若用户指定或希望采用某个特定画师风格（例如通过 query_presets 查到的画师串），请将 artist_preset 参数设为对应的画师预设名，系统会自动将该画师串及其负面词并入生成参数。若不使用画师串，请传入空字符串 ""。
 
             Args:
                 prompt(string): 经扩写完善的完整绘画提示词（必须为纯英文Tag，包含主体、风格、构图、光线、细节等）
@@ -2762,6 +2764,7 @@ class FigurineProPlugin(Star):
                 params(object): 生图参数对象（包含生成尺寸size、步数steps、CFG引导强度scale/温度、负面词negative_prompt等）
                 selfie(boolean): 自拍模式布尔值，是否为画AI助手自身形象
                 nsfw(boolean): NSFW加密模式布尔值，是否为成人内容
+                artist_preset(string): 指定使用的画师串预设名称（不使用可传空字符串）
             """
             prompt = (prompt or "").strip()
             force_full = bool(self.conf.get("force_full_params", False))
@@ -2787,6 +2790,8 @@ class FigurineProPlugin(Star):
                     reject_errors.append("selfie: 未指定自拍模式布尔值（必须显式传入 true 或 false）")
                 if nsfw is _PARAM_NOT_SET or not isinstance(nsfw, bool):
                     reject_errors.append("nsfw: 未指定 NSFW 模式布尔值（必须显式传入 true 或 false）")
+                if artist_preset is _PARAM_NOT_SET or not isinstance(artist_preset, str):
+                    reject_errors.append("artist_preset: 未指定画师串预设名称（不使用请显式传入空字符串 \"\"，可先调用 query_presets 查询）")
 
             # 若有参数不合格，按模板严厉打回
             if reject_errors:
@@ -2803,6 +2808,7 @@ class FigurineProPlugin(Star):
             final_params_param = params if (params is not _PARAM_NOT_SET and isinstance(params, dict)) else None
             final_selfie_param = bool(selfie) if selfie is not _PARAM_NOT_SET else False
             final_nsfw_param = bool(nsfw) if nsfw is not _PARAM_NOT_SET else False
+            final_artist_preset_param = str(artist_preset).strip() if (artist_preset is not _PARAM_NOT_SET and isinstance(artist_preset, str)) else ""
 
             if not prompt:
                 # 容错：如果非强制模式下模型漏传 prompt，尝试从用户原始文本中提取
@@ -2848,7 +2854,8 @@ class FigurineProPlugin(Star):
             cleaned_params, _ = self._sanitize_params(final_params_param, "LLM工具") if final_params_param else ({}, [])
             task = asyncio.create_task(self._async_generate(event, prompt, model=final_model, quota=quota,
                                                             params=cleaned_params,
-                                                            image_bytes_list=image_bytes_list, nsfw=final_nsfw_param))
+                                                            image_bytes_list=image_bytes_list, nsfw=final_nsfw_param,
+                                                            artist_preset=final_artist_preset_param))
             # 保存后台任务引用（防 GC），结束后自动从集合移除；terminate 时统一回收
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
@@ -2857,7 +2864,8 @@ class FigurineProPlugin(Star):
         async def _async_generate(self, event: AstrMessageEvent, prompt: str, model: str = "", quota: int = 1,
                                   params: Optional[Dict] = None,
                                   image_bytes_list: Optional[List[bytes]] = None,
-                                  nsfw: bool = False) -> None:
+                                  nsfw: bool = False,
+                                  artist_preset: str = "") -> None:
             """后台异步生图：完成后主动发送图片/失败提示到会话（不阻塞 LLM 回复）。
 
             model: 指定生图模型（可空，空则 _call_api 内部走默认选择逻辑）；
@@ -2865,6 +2873,7 @@ class FigurineProPlugin(Star):
             params: 生成参数（已在 generate_image 清洗），在 _call_api 内与模型默认参数合并；
             image_bytes_list: 用户当前消息中提取的参考图片（图+文生图用），None/空列表则纯文生图。
             nsfw: NSFW 加密模式——为 True 时生图结果打包成密码加密 ZIP 发送（不直接发图），默认 False。
+            artist_preset: 指定的画师串预设名称（优先级高于群级配置）。
             """
             sender_id = event.get_sender_id()
             group_id = event.get_group_id()
@@ -2887,7 +2896,8 @@ class FigurineProPlugin(Star):
                             logger.error(f"[NewImage] 发送生图次数不足提示失败: {e}", exc_info=True)
                         return
                 res, used_model = await self._call_api(image_bytes_list or [], prompt, image_size=None, group_id=group_id,
-                                                       model_override=model or None, gen_params=params or None)
+                                                       model_override=model or None, gen_params=params or None,
+                                                       artist_preset_override=artist_preset or None)
                 if isinstance(res, bytes):
                     # 记录实际扣减来源（群/个人），剩余次数展示与扣减来源一致
                     consumed_from = ""
@@ -3133,29 +3143,102 @@ class FigurineProPlugin(Star):
                     f"按用户（Top5）：{'，'.join(user_parts)}")
 
         @filter.llm_tool(name="query_presets")
-        async def query_presets(self, event: AstrMessageEvent, preset_name: Any = _PARAM_NOT_SET):
-            """查询生图预设（风格指令）列表或指定预设的提示词内容。用户问「有哪些预设/风格指令」「某个预设的提示词」时可调用。本工具不执行生图，仅查询。
+        async def query_presets(self, event: AstrMessageEvent, preset_name: Any = _PARAM_NOT_SET,
+                                category: Any = _PARAM_NOT_SET):
+            """查询生图预设（风格指令与画师串预设）列表或指定预设的详细内容。用户问「有哪些预设/画风」「有哪些画师串/画师预设」「某个画师串的内容」时调用。本工具不执行生图，仅查询。查询结果中获取到的画师串预设名可直接用于 generate_image 的 artist_preset 参数。
 
             Args:
-                preset_name(string): 预设触发词（查全部可填空串）
+                preset_name(string): 预设名称或关键词（查全部可填空串或 all）
+                category(string): 预设类别过滤，可选值：all（查全部）、artist（仅画师串预设）、style（仅普通风格预设）
             """
             force_full = bool(self.conf.get("force_full_params", False))
-            if force_full and preset_name is _PARAM_NOT_SET:
-                template = str(self.conf.get("correction_reject_template", "") or "").strip()
-                if not template:
-                    template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
-                return template.replace("{errors}", "\n- preset_name: 未指定预设名称参数（查询全部请传空字符串）")
+            if force_full:
+                reject_errors: List[str] = []
+                if preset_name is _PARAM_NOT_SET or not isinstance(preset_name, str):
+                    reject_errors.append("preset_name: 未指定预设名称参数（查询全部请传空字符串 \"\" 或 \"all\"）")
+                if category is _PARAM_NOT_SET or not isinstance(category, str):
+                    reject_errors.append("category: 未指定预设类别参数（必须显式传入 \"all\"、\"artist\" 或 \"style\"）")
+                if reject_errors:
+                    template = str(self.conf.get("correction_reject_template", "") or "").strip()
+                    if not template:
+                        template = "你是傻逼吗，参数都不填全。再不会填别吃token了。\n以下参数错误：{errors}"
+                    err_text = "；\n- ".join(reject_errors)
+                    return template.replace("{errors}", f"\n- {err_text}")
 
-            if not self.prompt_map:
-                return "当前未配置任何生图预设。"
             keyword = str(preset_name or "").strip() if preset_name is not _PARAM_NOT_SET else ""
-            if keyword and keyword != "all":
-                prompt = self.prompt_map.get(keyword)
-                if not prompt:
-                    return f"未找到预设 [{keyword}]。可用预设：{'、'.join(list(self.prompt_map.keys()))}"
-                return f"预设 [{keyword}] 的提示词内容：\n{prompt}"
-            presets = list(self.prompt_map.keys())
-            return f"可用生图预设（{len(presets)} 个）：\n{'、'.join(presets)}"
+            cat = str(category or "all").strip().lower() if category is not _PARAM_NOT_SET else "all"
+            if cat not in ("all", "artist", "style"):
+                cat = "all"
+
+            # 1. 查询指定预设详情（keyword 非空且不是 "all"）
+            if keyword and keyword.lower() != "all":
+                # 优先查画师串预设
+                if cat in ("all", "artist"):
+                    target_art = next((p for p in self.artist_presets if p.get("name") == keyword), None)
+                    if not target_art:
+                        target_art = next((p for p in self.artist_presets if keyword.lower() in p.get("name", "").lower()), None)
+                    if target_art:
+                        art_name = target_art.get("name", "")
+                        artists = target_art.get("artists", "")
+                        neg = target_art.get("negative", "")
+                        return (f"🎨 【画师串预设：{art_name}】\n"
+                                f"- 画师标签 (artists)：{artists or '无'}\n"
+                                f"- 专属负面词 (negative)：{neg or '无'}\n"
+                                f"- 💡 生图指引：在 generate_image 中传入 artist_preset=\"{art_name}\" 即可单次直接套用该画师风格！")
+
+                # 其次查普通风格预设 (prompt_map)
+                if cat in ("all", "style"):
+                    if keyword in self.prompt_map:
+                        return (f"🖌️ 【风格预设：{keyword}】\n"
+                                f"提示词内容：\n{self.prompt_map[keyword]}")
+
+                # 未找到具体预设
+                avail_artists = [p.get("name", "") for p in self.artist_presets]
+                avail_styles = list(self.prompt_map.keys())
+                err_parts = [f"未找到预设 [{keyword}]。"]
+                if cat in ("all", "artist") and avail_artists:
+                    err_parts.append(f"可用画师串预设：{'、'.join(avail_artists)}")
+                if cat in ("all", "style") and avail_styles:
+                    err_parts.append(f"可用风格预设：{'、'.join(avail_styles)}")
+                return "\n".join(err_parts)
+
+            # 2. 查询预设列表（keyword 为空或 "all"）
+            group_id = event.get_group_id()
+            current_group_artist = self.group_artists.get(str(group_id), "") if group_id else ""
+
+            output_sections = []
+
+            # 画师串预设列表
+            if cat in ("all", "artist"):
+                if self.artist_presets:
+                    art_lines = []
+                    for p in self.artist_presets:
+                        pname = p.get("name", "")
+                        is_cur = " (本群当前激活)" if pname == current_group_artist else ""
+                        neg_tip = f" [专属负面]" if p.get("negative") else ""
+                        art_lines.append(f"- {pname}{is_cur}{neg_tip}")
+                    cur_tip = f"\n当前群激活画师串: {current_group_artist}" if (current_group_artist and current_group_artist.lower() != "off") else "\n当前群未启用固定画师串"
+                    output_sections.append(
+                        f"🎨 可用画师串预设（{len(self.artist_presets)} 个）：\n"
+                        + "\n".join(art_lines)
+                        + cur_tip
+                        + "\n💡 提示：在 generate_image(artist_preset=\"预设名\") 中传入即可在单次生图中套用该画师风格！"
+                    )
+                else:
+                    output_sections.append("🎨 画师串预设：当前未配置任何画师串预设（可在 WebUI 或通过指令导入配置）。")
+
+            # 普通风格预设列表
+            if cat in ("all", "style"):
+                if self.prompt_map:
+                    styles = list(self.prompt_map.keys())
+                    output_sections.append(
+                        f"🖌️ 可用风格提示词预设（{len(styles)} 个）：\n"
+                        + "、".join(styles)
+                    )
+                else:
+                    output_sections.append("🖌️ 风格提示词预设：当前未配置任何风格预设。")
+
+            return "\n\n".join(output_sections) if output_sections else "当前未配置任何预设。"
 
     def _get_llm_tool_system_prompt(self) -> str:
         """获取注入到系统提示词中的生图函数工具说明。支持用户自定义覆盖与智力矫正模式适配。"""
@@ -3169,7 +3252,7 @@ class FigurineProPlugin(Star):
             correction_rules = ["\n\n【⚠️ 智力矫正模式 - 强制调用规范】："]
             if force_full:
                 correction_rules.append(
-                    "- 必须【完整填写所有参数】：严禁漏填任何参数！调用 generate_image 时必须显式携带 prompt、model、params、selfie、nsfw 所有字段（params 必须为包含 size/steps 等配置的对象，不可为空对象）。严禁偷懒省略参数！"
+                    "- 必须【完整填写所有参数】：严禁漏填任何参数！调用 generate_image 时必须显式携带 prompt、model、params、selfie、nsfw、artist_preset 所有字段（不使用画师串时 artist_preset 传空字符串 \"\"；params 必须为包含 size/steps 等配置的对象，不可为空对象）。严禁偷懒省略参数！调用 query_presets 时必须显式携带 preset_name 与 category 两个字段（查全部画师串可传 preset_name=\"all\", category=\"artist\"）。"
                 )
             if force_en:
                 correction_rules.append(
@@ -3511,13 +3594,15 @@ class FigurineProPlugin(Star):
 
     async def _call_api(self, image_bytes_list: List[bytes], prompt: str, image_size: Optional[str] = None,
                         group_id: Optional[str] = None, model_override: Optional[str] = None,
-                        gen_params: Optional[Dict] = None, size_strict: bool = False) -> tuple:
+                        gen_params: Optional[Dict] = None, size_strict: bool = False,
+                        artist_preset_override: Optional[str] = None) -> tuple:
         """调用 API 生成图像，支持 Gemini 原生 API 和 OpenAI 兼容格式双路由。
 
         参数 model_override: LLM 工具指定模型用（优先级最高，覆盖本群配置/provider/默认模型）。
         参数 gen_params: 生成参数（显式指定），在方法内与最终模型的默认参数合并（显式 > 模型默认）。
         参数 size_strict: 模型 allowed_sizes 限制校验模式——True=指令路径（用户显式指定不支持分辨率
             时报错拒绝）；False=LLM 路径（不支持时夹取到允许的最大分辨率，仅日志记录）。
+        参数 artist_preset_override: 显式指定要使用的画师串预设名（LLM 或单次调用指定，优先级高于本群绑定）。
         返回 (result, model_name) 二元组：
             - result: bytes=生图成功 / str=失败原因
             - model_name: 本次实际使用的模型名（错误早退路径可能为 ""）
@@ -3600,19 +3685,33 @@ class FigurineProPlugin(Star):
                     logger.info(f"[NewImage] 模型 {model_name} 不支持分辨率 {effective_size}，"
                                 f"已自动调整为允许的最大分辨率 {max_avail}")
 
-        # ========== 画师串预设合并（按群） ==========
-        # 当前群激活的画师串预设：prompt 追加 artists 串控画风；预设 negative 并入负面词。
-        artist_preset = self._get_group_artist_preset(group_id)
+        # ========== 画师串预设合并（优先级：显式指定 artist_preset_override > 按群 group_artists） ==========
+        artist_preset = None
+        if artist_preset_override:
+            override_name = str(artist_preset_override).strip()
+            # 优先精确匹配，其次不区分大小写匹配
+            target = next((p for p in self.artist_presets if p.get("name") == override_name), None)
+            if not target:
+                target = next((p for p in self.artist_presets if p.get("name", "").lower() == override_name.lower()), None)
+            if target:
+                artist_preset = target
+                logger.info(f"[NewImage] 显式应用指定的画师串预设「{target.get('name', '')}」")
+            else:
+                logger.warning(f"[NewImage] 显式指定的画师串预设「{artist_preset_override}」在库中未找到，回退本群默认画师串")
+
+        if not artist_preset:
+            artist_preset = self._get_group_artist_preset(group_id)
+
         if artist_preset:
             artists = str(artist_preset.get("artists", "") or "").strip()
             preset_neg = str(artist_preset.get("negative", "") or "").strip()
             if artists:
                 prompt = f"{prompt}, {artists}" if prompt else artists
-                logger.info(f"[NewImage] 群 {group_id} 应用画师串预设「{artist_preset.get('name', '')}」，prompt 追加画师标签")
+                logger.info(f"[NewImage] 应用画师串预设「{artist_preset.get('name', '')}」，prompt 追加画师标签")
             if preset_neg:
                 existing_neg = str(final_params.get("negative_prompt", "") or "").strip()
                 final_params["negative_prompt"] = f"{existing_neg}, {preset_neg}" if existing_neg else preset_neg
-                logger.info(f"[NewImage] 群 {group_id} 画师串预设「{artist_preset.get('name', '')}」并入负面词")
+                logger.info(f"[NewImage] 画师串预设「{artist_preset.get('name', '')}」并入负面词")
 
         # ========== NSFW 过滤（统一前置到负面词） ==========
         # nsfw_filter_enabled 开启时，把过滤标签前置到负面词最前（画师串/渠道/模型/显式负面词之后仍会叠加）。
