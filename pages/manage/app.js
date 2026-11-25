@@ -266,6 +266,7 @@
         enabled: el("pdEnabled").checked,
         use_reverse_proxy: el("pdReverseProxy").checked,
         insecure_ssl: el("pdInsecureSsl").checked,
+        openai_api_mode: el("pdApiMode").value,
       });
       // 2. 保存模型列表
       var res = await apiPost("providers/models", { provider: currentProviderId, models: r.models });
@@ -283,6 +284,7 @@
           providersData[i].enabled = el("pdEnabled").checked;
           providersData[i].use_reverse_proxy = el("pdReverseProxy").checked;
           providersData[i].insecure_ssl = el("pdInsecureSsl").checked;
+          providersData[i].openai_api_mode = el("pdApiMode").value;
           providersData[i].model_count = modelsData.length;
           break;
         }
@@ -369,6 +371,9 @@
     el("pdReverseProxyField").hidden = !isNovalai;
     el("provReverseProxyField").hidden = !isNovalai;
     el("provUserUrlField").hidden = !isNovalai;
+    var isOpenai = type === "openai";
+    el("pdApiModeField").hidden = !isOpenai;
+    el("provApiModeField").hidden = !isOpenai;
   }
 
   async function openProvider(id) {
@@ -389,6 +394,7 @@
     el("pdEnabled").checked = !!p.enabled;
     el("pdReverseProxy").checked = !!p.use_reverse_proxy;
     el("pdInsecureSsl").checked = !!p.insecure_ssl;
+    el("pdApiMode").value = p.openai_api_mode || "chat";
     syncReverseProxyField(p.type);
     showDetailView();
     await loadProviderModels(id);
@@ -420,6 +426,7 @@
         enabled: next,
         use_reverse_proxy: !!p.use_reverse_proxy,
         insecure_ssl: !!p.insecure_ssl,
+        openai_api_mode: p.openai_api_mode || "chat",
       });
       toast("提供商「" + p.name + "」已" + (next ? "启用" : "停用"), "success");
     } catch (e) {
@@ -491,6 +498,7 @@
     el("provEnabled").checked = !!p.enabled;
     el("provReverseProxy").checked = !!p.use_reverse_proxy;
     el("provInsecureSsl").checked = !!p.insecure_ssl;
+    el("provApiMode").value = p.openai_api_mode || "chat";
     syncReverseProxyField(p.type);
     el("provName").classList.remove("invalid");
     el("provKey").classList.remove("invalid");
@@ -538,6 +546,7 @@
           enabled: el("provEnabled").checked,
           use_reverse_proxy: el("provReverseProxy").checked,
           insecure_ssl: el("provInsecureSsl").checked,
+          openai_api_mode: el("provApiMode").value,
         });
         toast("提供商「" + name + "」已更新", "success");
       } else {
@@ -546,6 +555,7 @@
           user_url: userUrl,
           use_reverse_proxy: el("provReverseProxy").checked,
           insecure_ssl: el("provInsecureSsl").checked,
+          openai_api_mode: el("provApiMode").value,
         });
         toast("已添加提供商「" + name + "」", "success");
       }

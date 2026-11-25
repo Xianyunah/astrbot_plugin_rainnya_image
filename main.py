@@ -336,6 +336,23 @@ def _max_allowed_size(allowed_sizes: List[str]) -> Optional[str]:
     return max(allowed_sizes, key=lambda s: _SIZE_RANK.get(s, 0))
 
 
+def _openai_image_size(size: Any) -> str:
+    """把插件内部尺寸档位映射为 OpenAI Images API 的 "宽x高" 格式。
+
+    - 已符合 "1024x1024" 格式 → 原样使用（用户/中转自定义尺寸优先）
+    - landscape_* → 1536x1024；portrait_* → 1024x1536
+    - square / 1K / 2K / 4K / 未知 → 1024x1024（Images API 最通用尺寸）
+    """
+    s = str(size or "").strip().lower()
+    if re.fullmatch(r"\d{2,5}x\d{2,5}", s):
+        return s
+    if s.startswith("landscape"):
+        return "1536x1024"
+    if s.startswith("portrait"):
+        return "1024x1536"
+    return "1024x1024"
+
+
 def _coerce_param_value(key: str, value: Any, clamp: bool) -> tuple:
     """校验/转换单个参数值；返回 (ok: bool, coerced: Any)。
 
@@ -443,7 +460,7 @@ def _rejoin_prompt_list(items: List[Any]) -> List[str]:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.2.3",
+    "1.2.4",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
@@ -3753,6 +3770,15 @@ class FigurineProPlugin(Star):
                                                 image_size, source_info, final_params,
                                                 insecure_ssl=insecure_ssl), model_name
         else:
+            # OpenAI 兼容渠道：按提供商配置决定走 chat/completions 还是 images/generations
+            # （muse-image 等纯图像模型必须走 images 端点，否则只会返回一句文字描述）
+            api_mode = str(provider.get("openai_api_mode", "chat") or "chat").strip().lower()
+            if api_mode == "images":
+                logger.info(f"[NewImage] 提供商「{provider_name}」使用 Images API 模式"
+                            f"（/v1/images/generations）")
+                return await self._call_openai_images_api(api_url, api_key, model_name, image_bytes_list,
+                                                          prompt, source_info, final_params,
+                                                          insecure_ssl=insecure_ssl), model_name
             return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt,
                                                source_info, final_params,
                                                insecure_ssl=insecure_ssl), model_name
@@ -4047,6 +4073,101 @@ class FigurineProPlugin(Star):
             return "请求超时"
         except Exception as e:
             logger.error(f"调用 API 时发生未知错误: {e}", exc_info=True)
+            return f"发生未知错误: {e}"
+
+    async def _call_openai_images_api(self, api_url: str, api_key: str, model_name: str,
+                                       image_bytes_list: List[bytes], prompt: str, source_info: str,
+                                       gen_params: Optional[Dict] = None,
+                                       insecure_ssl: bool = False) -> bytes | str:
+        """OpenAI Images API 路径（POST {base}/v1/images/generations）。
+
+        适用于标准图像生成模型（DALL·E / gpt-image-1 / muse-image 等）：一次请求直接返回图像，
+        不会像 chat/completions 那样只返回一句话描述。响应解析复用
+        extract_image_bytes_from_response（data[].b64_json 与 data[].url 两种格式都支持）。
+
+        与 chat 模式的差异：
+            - 请求体是 {model, prompt, n, size, ...}，没有 messages 结构
+            - 不支持图生图（参考图）→ 有参考图时明确提示改用 chat 模式
+            - 尺寸需为 "宽x高" 直白格式，由 _openai_image_size 映射
+        insecure_ssl: 为 True 时跳过 HTTPS 证书校验（自签名证书的自建中转）。
+        """
+        # ========== 端点归一化（兼容用户把完整路径粘进 BaseURL）==========
+        api_url = api_url.rstrip("/")
+        if re.search(r"/v\d+/images/(generations|edits)$", api_url):
+            pass  # 已是完整 images 端点
+        elif re.search(r"/v\d+/chat/completions$", api_url):
+            # 用户把完整 chat 路径粘进了 BaseURL → 自动纠正为 images 端点
+            api_url = re.sub(r"/chat/completions$", "/images/generations", api_url)
+        elif re.search(r"/v\d+$", api_url):
+            api_url = api_url + "/images/generations"
+        else:
+            api_url = api_url + "/v1/images/generations"
+
+        if image_bytes_list:
+            return ("❌ 当前提供商配置为 Images API 模式（/v1/images/generations），"
+                    "该端点不支持图生图。请改用 chat 模式，或更换支持图生图的渠道。")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/astrbot",
+            "X-Title": "AstrBot NewImage Plugin",
+        }
+
+        # ========== 构造 Images API 请求体 ==========
+        payload: Dict[str, Any] = {"model": model_name, "prompt": prompt, "n": 1}
+        size_val = (gen_params or {}).get("size")
+        payload["size"] = _openai_image_size(size_val) if size_val else _openai_image_size(None)
+        # 其余生成参数直接透传（negative_prompt / steps / quality / style / seed 等，中转普遍支持）
+        for pk, pv in (gen_params or {}).items():
+            if pk == "size":
+                continue
+            payload[pk] = pv
+
+        logger.info(f"[NewImage/OAI-Images] 发送请求 [{source_info}]: Model={model_name}, "
+                    f"Size={payload['size']}")
+
+        try:
+            if not self.iwf:
+                return "ImageWorkflow 未初始化"
+            async with self.iwf.session.post(
+                api_url, json=payload, headers=headers,
+                proxy=self.iwf.proxy, timeout=self.api_timeout,
+                ssl=False if insecure_ssl else None,
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(f"[NewImage/OAI-Images] 请求失败: HTTP {resp.status}, 响应: {error_text[:500]}")
+                    if resp.status >= 500:
+                        return f"⚠️ API 服务端繁忙或超时（HTTP {resp.status}），请稍后重试。"
+                    return f"Images API 请求失败 (HTTP {resp.status}): {error_text[:300]}"
+
+                data = await resp.json()
+
+                result = await extract_image_bytes_from_response(data, self.iwf)
+
+                if isinstance(result, bytes):
+                    return result
+
+                if isinstance(result, str) and result.startswith("FALLBACK_URL:"):
+                    fallback_url = result[len("FALLBACK_URL:"):]
+                    logger.warning(f"图片下载失败，返回备用URL供用户访问: {fallback_url}")
+                    return f"⚠️ 图片已生成但下载失败，请直接访问链接查看:\n{fallback_url}"
+
+                if isinstance(data, dict) and "error" in data:
+                    err = data["error"]
+                    if isinstance(err, dict):
+                        return err.get("message", json.dumps(err, ensure_ascii=False))
+                    return str(err)
+
+                error_msg = f"Images API 响应中未找到可用的图像数据: {str(data)[:500]}..."
+                logger.error(error_msg)
+                return error_msg
+        except asyncio.TimeoutError:
+            logger.error("[NewImage/OAI-Images] 请求超时")
+            return "请求超时"
+        except Exception as e:
+            logger.error(f"[NewImage/OAI-Images] 调用 API 时发生未知错误: {e}", exc_info=True)
             return f"发生未知错误: {e}"
 
     def _fit_novalai_dimensions(self, width: int, height: int) -> tuple:
@@ -4631,6 +4752,7 @@ class FigurineProPlugin(Star):
                     "user_url": str(p.get("user_url", "") or ""),
                     "use_reverse_proxy": bool(p.get("use_reverse_proxy", False)),
                     "insecure_ssl": bool(p.get("insecure_ssl", False)),
+                    "openai_api_mode": str(p.get("openai_api_mode", "chat") or "chat"),
                     "enabled": bool(p.get("enabled", True)),
                     "model_count": len(p.get("models") or []),
                 })
@@ -4667,6 +4789,7 @@ class FigurineProPlugin(Star):
                 "user_url": str(payload.get("user_url", "") or "").strip(),
                 "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
                 "insecure_ssl": bool(payload.get("insecure_ssl", False)),
+                "openai_api_mode": ("images" if str(payload.get("openai_api_mode", "chat") or "chat").strip().lower() == "images" else "chat"),
                 "enabled": True,
                 "models": copy.deepcopy(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
             }
@@ -4741,6 +4864,11 @@ class FigurineProPlugin(Star):
                 target["use_reverse_proxy"] = bool(payload.get("use_reverse_proxy"))
             if "insecure_ssl" in payload:
                 target["insecure_ssl"] = bool(payload.get("insecure_ssl"))
+            if "openai_api_mode" in payload:
+                mode = str(payload.get("openai_api_mode", "chat") or "chat").strip().lower()
+                if mode not in ("chat", "images"):
+                    return error_response("openai_api_mode 必须是 chat 或 images 之一")
+                target["openai_api_mode"] = mode
             if "enabled" in payload:
                 target["enabled"] = bool(payload.get("enabled"))
             await self._save_providers()

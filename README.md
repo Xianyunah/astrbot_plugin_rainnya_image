@@ -269,6 +269,15 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 
 ## 📝 更新日志
 
+### v1.2.4 自用增强版（2026-11）
+
+- 🎯 **OpenAI 兼容渠道支持 Images API 端点模式**：
+  - 修复纯图像模型（如 `muse-image`、`dall-e-3`、`gpt-image-1`）走 `chat/completions` 时只返回一句文字描述、报「API响应中未找到可用的图像数据」的问题。
+  - 提供商配置新增「OpenAI 端点模式」下拉：`chat/completions`（对话式出图，兼容 gpt-4o-image 等）/ `images/generations`（标准图像模型）。
+  - 选择 `images` 模式时自动归一化端点：BaseURL 已含 `/v1` 则补 `/images/generations`；若误粘了完整 `/chat/completions` 路径会自动纠正。
+  - 尺寸自动映射（`portrait_*`→1024x1536、`landscape_*`→1536x1024、`1K/2K/4K/square`→1024x1024、已是 `宽x高` 格式则原样透传），其余参数（`negative_prompt`/`steps`/`quality`/`style`/`seed` 等）自动透传。
+  - 响应解析复用现有 `data[].b64_json` 与 `data[].url` 双格式支持；Images 端点不支持图生图，有参考图时会明确提示改用 chat 模式。
+
 ### v1.2.3 自用增强版（2026-11）
 
 - 🔐 **提供商级「跳过 SSL 证书校验」开关**：
