@@ -148,6 +148,10 @@
                 <span class="field-label">启用反代模式（NovalAI）<i class="field-hint">开启后生图走 GET 反代格式（如 std.loliyc.com），关闭走官方协议</i></span>
                 <input type="checkbox" id="pdReverseProxy" class="switch">
               </label>
+              <label class="field field-row" id="pdInsecureSslField">
+                <span class="field-label">跳过 SSL 证书校验<i class="field-hint">自建反代/私有网关使用自签名证书时务必开启，否则会报 CERTIFICATE_VERIFY_FAILED。请仅在确认目标可信时使用</i></span>
+                <input type="checkbox" id="pdInsecureSsl" class="switch">
+              </label>
             </div>
           </div>
 
@@ -1179,6 +1183,10 @@
           <span class="field-label">启用反代模式（NovalAI）<i class="field-hint">开启后生图走 GET 反代格式，关闭走官方协议</i></span>
           <input type="checkbox" id="provReverseProxy" class="switch">
         </label>
+        <label class="field field-row" id="provInsecureSslField">
+          <span class="field-label">跳过 SSL 证书校验<i class="field-hint">自建反代/私有网关使用自签名证书时开启（http 地址无需开启）</i></span>
+          <input type="checkbox" id="provInsecureSsl" class="switch">
+        </label>
       </div>
       <div class="modal-foot">
         <button type="button" class="btn btn-ghost" id="providerCancel">取消</button>
@@ -1300,6 +1308,6 @@
 
   <!-- 显式先加载 bridge SDK，保证 app.js 同步取到 window.AstrBotPluginPage（AstrBot 见已有此标签则不再重复注入） -->
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=1.2.2"></script>
+  <script src="./app.js?v=1.2.3"></script>
 </body>
 </html>

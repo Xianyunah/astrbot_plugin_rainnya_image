@@ -443,7 +443,7 @@ def _rejoin_prompt_list(items: List[Any]) -> List[str]:
     "astrbot_plugin_rainnya_image",
     "xianyunah",
     "AI生图插件：支持Gemini原生API与OpenAI兼容双路由，图生图/文生图/自定义Prompt，含安全过滤、高分辨率白名单与签到系统",
-    "1.2.2",
+    "1.2.3",
     "https://github.com/Xianyunah/astrbot_plugin_rainnya_image",
 )
 class FigurineProPlugin(Star):
@@ -3371,12 +3371,13 @@ class FigurineProPlugin(Star):
                 self.group_task_counts[group_id] = current - 1
             logger.debug(f"[FigurinePro] 群 {group_id} 任务释放，当前 {self.group_task_counts.get(group_id, 0)}")
 
-    async def _check_novai_key(self, base_url: str, api_key: str) -> dict:
+    async def _check_novai_key(self, base_url: str, api_key: str, insecure_ssl: bool = False) -> dict:
         """NovelAI token 预检：GET {user_url}/user/data 解析订阅信息。
 
         返回 {"ok": bool, "error": str|None, **subscription_info}。
         有效判定：active 为真 或 purchasedTrainingSteps>0 或 fixedTrainingStepsLeft>0。
         失败/超时不抛异常，返回 {"ok": False, "error": 原因}（软校验，不拦截生图）。
+        insecure_ssl: 为 True 时跳过 HTTPS 证书校验（自建反代常用自签证书）。
         """
         try:
             if not self.iwf:
@@ -3395,6 +3396,7 @@ class FigurineProPlugin(Star):
             timeout = max(1, int(self.conf.get("novai_precheck_timeout", 10) or 10))
             async with self.iwf.session.get(
                 endpoint, headers=headers, proxy=self.iwf.proxy, timeout=timeout,
+                ssl=False if insecure_ssl else None,
             ) as resp:
                 if resp.status != 200:
                     body = (await resp.read())[:200].decode("utf-8", errors="replace")
@@ -3432,7 +3434,8 @@ class FigurineProPlugin(Star):
         try:
             if not self.conf.get("novai_precheck_enabled", True):
                 return
-            status = await self._check_novai_key(user_url, api_key)
+            status = await self._check_novai_key(user_url, api_key,
+                                                 insecure_ssl=bool(provider.get("insecure_ssl", False)))
             provider["_user_status"] = status
             if status.get("ok"):
                 logger.info(f"[NewImage] NovelAI 提供商「{pname}」token 有效"
@@ -3644,6 +3647,10 @@ class FigurineProPlugin(Star):
         api_key = str(provider.get("api_key", "") or "").strip()
         provider_type = str(provider.get("type", "") or "openai").strip()
         provider_name = str(provider.get("name", "") or provider.get("id", "未命名"))
+        # 跳过 SSL 证书校验（自建反代/私有网关常用自签证书；按提供商粒度开关，默认关闭）
+        insecure_ssl = bool(provider.get("insecure_ssl", False))
+        if insecure_ssl:
+            logger.info(f"[NewImage] 提供商「{provider_name}」已启用跳过 SSL 证书校验")
         if not api_url:
             return f"❌ 提供商「{provider_name}」未配置 BaseURL，请在 WebUI 提供商管理中配置", model_name
         if not api_key:
@@ -3727,7 +3734,8 @@ class FigurineProPlugin(Star):
         # ========== 按提供商 type 选择路由 ==========
         if provider_type == "gemini":
             return await self._call_gemini_api(api_url, api_key, model_name, image_bytes_list, prompt,
-                                               image_size, source_info, final_params), model_name
+                                               image_size, source_info, final_params,
+                                               insecure_ssl=insecure_ssl), model_name
         elif provider_type == "novalai":
             # token 预检结果软校验（_user_status 由 initialize 后台写入；不拦截生图，仅打日志）
             user_status = provider.get("_user_status")
@@ -3742,17 +3750,21 @@ class FigurineProPlugin(Star):
                                                                   prompt, image_size, source_info,
                                                                   final_params), model_name
             return await self._call_novalai_api(api_url, api_key, model_name, image_bytes_list, prompt,
-                                                image_size, source_info, final_params), model_name
+                                                image_size, source_info, final_params,
+                                                insecure_ssl=insecure_ssl), model_name
         else:
             return await self._call_openai_api(api_url, api_key, model_name, image_bytes_list, prompt,
-                                               source_info, final_params), model_name
+                                               source_info, final_params,
+                                               insecure_ssl=insecure_ssl), model_name
 
     async def _call_gemini_api(self, api_url: str, api_key: str, model_name: str,
                                 image_bytes_list: List[bytes], prompt: str,
                                 image_size: Optional[str], source_info: str,
-                                gen_params: Optional[Dict] = None) -> bytes | str:
+                                gen_params: Optional[Dict] = None,
+                                insecure_ssl: bool = False) -> bytes | str:
         """Gemini 原生 API 路径（generateContent）
 
+        insecure_ssl: 为 True 时跳过 HTTPS 证书校验（自签名证书的自建网关）。
         gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
             temperature → generationConfig.temperature（float）
             max_tokens  → generationConfig.maxOutputTokens（int）
@@ -3841,6 +3853,7 @@ class FigurineProPlugin(Star):
                 headers={"Content-Type": "application/json"},
                 proxy=self.iwf.proxy,
                 timeout=self.api_timeout,
+                ssl=False if insecure_ssl else None,
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -3894,9 +3907,11 @@ class FigurineProPlugin(Star):
 
     async def _call_openai_api(self, api_url: str, api_key: str, model_name: str,
                                 image_bytes_list: List[bytes], prompt: str, source_info: str,
-                                gen_params: Optional[Dict] = None) -> bytes | str:
+                                gen_params: Optional[Dict] = None,
+                                insecure_ssl: bool = False) -> bytes | str:
         """OpenAI 兼容 API 路径（/v1/chat/completions）
 
+        insecure_ssl: 为 True 时跳过 HTTPS 证书校验（自签名证书的自建中转）。
         gen_params: 合并后的生成参数（显式 > 模型默认），映射规则：
             temperature → payload.temperature（float）
             max_tokens  → payload.max_tokens（int）
@@ -3977,6 +3992,7 @@ class FigurineProPlugin(Star):
             async with self.iwf.session.post(
                 api_url, json=payload, headers=headers,
                 proxy=self.iwf.proxy, timeout=self.api_timeout,
+                ssl=False if insecure_ssl else None,
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -4051,7 +4067,8 @@ class FigurineProPlugin(Star):
     async def _call_novalai_api(self, api_url: str, api_key: str, model_name: str,
                                 image_bytes_list: List[bytes], prompt: str,
                                 image_size: Optional[str], source_info: str,
-                                gen_params: Optional[Dict] = None) -> bytes | str:
+                                gen_params: Optional[Dict] = None,
+                                insecure_ssl: bool = False) -> bytes | str:
         """NovelAI 独立路由（POST {base_url}/ai/generate-image）。
 
         NovelAI 结构与 gemini/openai 完全不同：prompt 放在 v4_prompt.caption.base_caption，
@@ -4059,6 +4076,7 @@ class FigurineProPlugin(Star):
         图生图 action=img2img 并在 parameters 追加 strength/noise/image/extra_noise_seed，
         width/height 覆盖为原图实际尺寸。响应为 ZIP（image_0.png）。
 
+        insecure_ssl: 为 True 时跳过 HTTPS 证书校验（自签名证书的自建反代）。
         gen_params: 合并后的生成参数（渠道默认 < 模型默认 < 显式），映射规则：
             size        → width/height（1K=832×1216、2K=1152×1664、4K=1664×2432，64 倍数）
             steps       → parameters.steps（默认 23，免费档 clamp ≤28）
@@ -4197,6 +4215,7 @@ class FigurineProPlugin(Star):
                 async with self.iwf.session.post(
                     endpoint, json=request_body, headers=headers,
                     proxy=self.iwf.proxy, timeout=self.api_timeout,
+                    ssl=False if insecure_ssl else None,
                 ) as resp:
                     # 遇到 429 且未达到最大重试次数：完全静默重试，不向会话发送任何信息
                     if resp.status == 429 and attempt < max_retries:
@@ -4611,6 +4630,7 @@ class FigurineProPlugin(Star):
                     "base_url": p.get("base_url", ""),
                     "user_url": str(p.get("user_url", "") or ""),
                     "use_reverse_proxy": bool(p.get("use_reverse_proxy", False)),
+                    "insecure_ssl": bool(p.get("insecure_ssl", False)),
                     "enabled": bool(p.get("enabled", True)),
                     "model_count": len(p.get("models") or []),
                 })
@@ -4646,6 +4666,7 @@ class FigurineProPlugin(Star):
                 "base_url": base_url,
                 "user_url": str(payload.get("user_url", "") or "").strip(),
                 "use_reverse_proxy": bool(payload.get("use_reverse_proxy", False)),
+                "insecure_ssl": bool(payload.get("insecure_ssl", False)),
                 "enabled": True,
                 "models": copy.deepcopy(PROVIDER_DEFAULT_MODELS.get(ptype, [])),
             }
@@ -4718,6 +4739,8 @@ class FigurineProPlugin(Star):
                     target["api_key"] = api_key
             if "use_reverse_proxy" in payload:
                 target["use_reverse_proxy"] = bool(payload.get("use_reverse_proxy"))
+            if "insecure_ssl" in payload:
+                target["insecure_ssl"] = bool(payload.get("insecure_ssl"))
             if "enabled" in payload:
                 target["enabled"] = bool(payload.get("enabled"))
             await self._save_providers()
