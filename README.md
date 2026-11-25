@@ -269,6 +269,20 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 
 ## 📝 更新日志
 
+### v1.2.5 自用增强版（2026-11）
+
+- 🧱 **架构重构：5685 行单文件拆分为模块化分层结构**（`main.py` 只剩 338 行装配代码）：
+  - `constants.py`：常量 / Prompt 模板 / 参数 Schema / 无状态函数，统一 `__all__` 导出。
+  - `providers/`：渠道驱动层（`base.py` 路由核心、`gemini.py`、`openai.py`、`novalai.py`）。
+  - `services/`：领域服务层（`state.py` 状态持久化、`quota.py` 配额、`artist.py` 画师、`media.py` 媒体、`interactive.py` 调参任务）。
+  - `handlers/`：AstrBot 接口层（`commands.py` 指令、`llm_tools.py` LLM 工具、`web_api.py` WebUI 后端）。
+  - 选型为 **Mixin 混入**：装饰器在方法定义时即完成注册，且 AstrBot 按模块路径前缀判定归属，故拆分后 7 个 LLM 工具与 27 个 handler 全部照常被发现（已实机导入验证）。
+- 🖼️ **补齐 `/v1/images/edits` 图生图端点**（Images 模式）：
+  - 有参考图时自动路由到 `POST /v1/images/edits`（`multipart/form-data`），支持多图输入；纯文生图仍走 `/v1/images/generations`（JSON）。
+  - 参考图以 multipart `image` 字段上传，`quality`/`input_fidelity`/`background`/`output_format`/`strength`/`negative_prompt` 等参数自动透传。
+  - 图像 API 为同步接口，超时下限放宽到 300s，避免大图被过早掐断。
+  - 端点自动归一化：BaseURL 误填完整 `/v1/chat/completions` 或 `/v1/images/generations` 均会纠正到 `/v1/images/edits`。
+
 ### v1.2.4 自用增强版（2026-11）
 
 - 🎯 **OpenAI 兼容渠道支持 Images API 端点模式**：
