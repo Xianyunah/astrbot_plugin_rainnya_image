@@ -219,9 +219,95 @@ class FigurineProPlugin(
         # Web API 相关（供插件 WebUI 调用）
         self._web_registered = False
         self._register_web_apis()
+        # 兼容垫片：修复 Mixin 子模块下 handler / LLM 工具未被框架绑定的问题（见方法注释）
+        self._ensure_runtime_bindings()
+
+    def _ensure_runtime_bindings(self) -> None:
+        """自愈绑定：把本插件在子模块中定义的 handler 与 LLM 工具绑定到当前实例。
+
+        **背景（AstrBot 4.27.2 实测）**
+        框架加载插件时，按「模块路径严格相等」判定归属后才会做实例绑定：
+
+            star_manager.py: get_handlers_by_module_name(metadata.module_path)
+                            → handler.handler_module_path == module_name
+            star_manager.py: getattr(ft.handler, "__module__", None) == metadata.module_path
+
+        而 `metadata.module_path` 恒为插件**入口模块**（`...main`）。本插件自 v1.2.5 起采用
+        Mixin 分层，方法实际定义在 `handlers/`、`providers/` 等子模块中，`__module__` 是
+        子模块路径 → 严格相等不成立 → 框架**跳过绑定** → 运行时 `self` / `event` 参数错位：
+
+            LLMToolsMixin.generate_image() missing 1 required positional argument: 'event'
+            CommandsMixin.on_figurine_request() missing 1 required positional argument: 'self'
+
+        这里显式补绑为 `functools.partial(raw_handler, self)`，并把 `handler_module_path`
+        归一到入口模块，使后续插件重载 / 停用 / 卸载的框架生命周期仍能正确覆盖这些 handler。
+        操作幂等：已绑定到本实例的会被跳过，框架再次处理也不会重复包裹。
+        """
+        try:
+            entry_module = type(self).__module__  # 例如 data.plugins.<pkg>.main
+            if not entry_module:
+                return
+            pkg_prefix = entry_module.rsplit(".", 1)[0] if "." in entry_module else entry_module
+
+            def _belongs(raw_handler: Any) -> bool:
+                module = getattr(raw_handler, "__module__", "") or ""
+                return module == pkg_prefix or module.startswith(f"{pkg_prefix}.")
+
+            def _bind(obj: Any, kind: str) -> bool:
+                handler = getattr(obj, "handler", None)
+                if handler is None:
+                    return False
+                raw_handler = handler.func if isinstance(handler, functools.partial) else handler
+                if not _belongs(raw_handler):
+                    return False
+                # 已绑定到本实例：仅校正归属路径，避免重复包裹
+                if isinstance(handler, functools.partial) and handler.args and handler.args[0] is self:
+                    try:
+                        obj.handler_module_path = entry_module
+                    except Exception:
+                        pass
+                    return False
+                try:
+                    obj.handler = functools.partial(raw_handler, self)
+                    obj.handler_module_path = entry_module
+                    return True
+                except Exception as bind_err:
+                    logger.warning(
+                        f"[NewImage] 绑定 {kind} 失败"
+                        f"（{getattr(raw_handler, '__name__', '?')}）: {bind_err}"
+                    )
+                    return False
+
+            bound_tools = bound_handlers = 0
+            # 1) LLM 函数工具
+            try:
+                from astrbot.core.provider.register import llm_tools
+                for tool in list(llm_tools.func_list):
+                    if _bind(tool, "LLM 工具"):
+                        bound_tools += 1
+            except Exception as e:
+                logger.warning(f"[NewImage] 遍历 LLM 工具补绑失败: {e}")
+            # 2) 事件 handler（群指令 / 正则 / on_llm_request 等）
+            try:
+                from astrbot.core.star.star_handler import star_handlers_registry
+                for meta in list(star_handlers_registry):
+                    if _bind(meta, "事件 handler"):
+                        bound_handlers += 1
+            except Exception as e:
+                logger.warning(f"[NewImage] 遍历事件 handler 补绑失败: {e}")
+
+            if bound_tools or bound_handlers:
+                logger.info(
+                    f"[NewImage] 已补绑 {bound_tools} 个 LLM 工具 / {bound_handlers} 个事件 handler "
+                    f"到插件实例（模块化分层结构兼容处理）"
+                )
+        except Exception as e:
+            logger.error(f"[NewImage] 运行时绑定自愈失败: {e}", exc_info=True)
 
 
     async def initialize(self):
+        # 双保险：__init__ 之后框架可能重排/解包 handler，这里再自愈一次（幂等无副作用）
+        self._ensure_runtime_bindings()
         use_proxy = self.conf.get("use_proxy", False)
         proxy_url = self.conf.get("proxy_url") if use_proxy else None
 

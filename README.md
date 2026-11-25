@@ -269,6 +269,14 @@ gemini-flash;1;性价比之选;{"sizes":["1K"]}
 
 ## 📝 更新日志
 
+### v1.2.6 自用增强版（2026-11）
+
+- 🐛 **修复 v1.2.5 模块化拆分导致的 handler 绑定失效（严重回归）**：
+  - 现象：所有 LLM 函数工具报 `missing 1 required positional argument: 'event'`；所有群指令同样会因 `self` 未绑定而失败。
+  - 根因：AstrBot 加载插件时按**模块路径严格相等**（`handler.handler_module_path == metadata.module_path`）判定归属后才做实例绑定；`metadata.module_path` 恒为入口模块 `...main`，而 Mixin 子模块方法的 `__module__` 是子模块路径，严格相等不成立 → 框架跳过绑定。
+  - 修复：新增 `_ensure_runtime_bindings()`，在 `__init__` 末尾按包前缀扫描本插件的 LLM 工具与事件 handler，显式补绑 `functools.partial(raw, self)` 并将 `handler_module_path` 归一到入口模块，使插件重载/停用/卸载的框架生命周期判断依然生效。
+  - 已验证：7 个 LLM 工具 + 27 个事件 handler 全部绑定；重复调用幂等、被框架解包后可自愈；端到端调用 `query_presets` 正常返回。
+
 ### v1.2.5 自用增强版（2026-11）
 
 - 🧱 **架构重构：5685 行单文件拆分为模块化分层结构**（`main.py` 只剩 338 行装配代码）：

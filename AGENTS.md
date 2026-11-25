@@ -5,7 +5,7 @@ AstrBot 生图插件 fork（自用增强版）。本文只记录 agent 容易判
 ## 当前状态
 
 - 当前分支：`main`；主要自用远端为 Gitea `origin`，另有 GitHub `github` 与上游 `upstream`。
-- 插件元数据在 `metadata.yaml`：名称 `astrbot_plugin_rainnya_image`，版本 `v1.2.5`。
+- 插件元数据在 `metadata.yaml`：名称 `astrbot_plugin_rainnya_image`，版本 `v1.2.6`。
 - 没有本地真实生图测试；真实验证需要 AstrBot 运行时和有效 API key。
 
 ## 结构（v1.2.5 起已模块化，main.py 仅保留装配）
@@ -43,7 +43,13 @@ PYTHONPATH=/home/miaomiao/Project/astrbot:/home/miaomiao/Project/Astrbotplugins 
 
 - **三类路由**：Gemini 原生、OpenAI 兼容、NovelAI 原生/反代；改 API 必须覆盖对应 provider 分支。
 - **OpenAI 兼容有第三种子模式**：`provider["openai_api_mode"]` = `chat`（/v1/chat/completions）/ `images`（/v1/images/generations 文生图 + 自动路由 /v1/images/edits 图生图）。纯图像模型（muse-image、dall-e-3、gpt-image-1）必须用 images。
-- **Mixin 拆分不影响 AstrBot 发现**：装饰器在方法定义时注册，归属判定是模块路径前缀匹配（`data.plugins.<pkg>.*`），因此子模块里的 `@filter.command` / `@filter.llm_tool` 自动归属于本插件。
+- **⚠️ Mixin 拆分的致命坑（v1.2.5 踩过，v1.2.6 修复）**：
+  - 装饰器**注册**是定义时完成（子模块没问题），但框架**实例绑定**用的是**模块路径严格相等**：
+    `handler.handler_module_path == metadata.module_path`（`get_handlers_by_module_name` 与 LLM 工具循环都是 `==`，不是前缀前缀匹配）。
+  - `metadata.module_path` 恒为入口模块（`...main`），子模块方法的 `__module__` 是子模块路径 → **不相等 → 框架跳过绑定** → 运行时 `self`/`event` 错位，报
+    `LLMToolsMixin.generate_image() missing 1 required positional argument: 'event'` 或 `CommandsMixin.xxx() missing ... 'self'`。
+  - 解决：`FigurineProPlugin._ensure_runtime_bindings()`（`__init__` 末尾调用）显式把本插件 `functools.partial(raw, self)` 补绑，并把 `handler_module_path` 归一到入口模块。
+  - **动结构前必读**：若未来再往子模块搬带装饰器的方法，确认该 shim 仍然覆盖（它按包前缀扫描，自动覆盖新子模块，无需改代码）。
 - **图片提取**：调用方区分 `bytes`、`FALLBACK_URL:` 和 `None`，不要复制解析逻辑。
 - **配额**：成功生成后才扣次数；管理员豁免；数据在 AstrBot 数据目录。
 - **WebUI 名称必须一致**：metadata name、`WEB_PLUGIN_NAME`、页面路径均为 `astrbot_plugin_rainnya_image`；bridge SDK 要在 app.js 前加载。
